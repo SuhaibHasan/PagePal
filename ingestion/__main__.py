@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 
 import chromadb
 from elasticsearch import Elasticsearch
-from neo4j import GraphDatabase
+from neo4j import AsyncGraphDatabase
 
 from ingestion.loaders.base import BaseLoader
 from ingestion.loaders.confluence_loader import ConfluenceLoader
@@ -47,6 +48,34 @@ def _build_loaders(args: argparse.Namespace) -> list[BaseLoader]:
     return loaders
 
 
+async def _run(loaders: list[BaseLoader]) -> None:
+    chroma_client = chromadb.HttpClient(
+        host=os.environ.get("CHROMA_HOST", "localhost"),
+        port=int(os.environ.get("CHROMA_PORT", "8000")),
+    )
+    es_client = Elasticsearch(os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200"))
+    neo4j_driver = AsyncGraphDatabase.driver(
+        os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+        auth=(
+            os.environ.get("NEO4J_USER", "neo4j"),
+            os.environ.get("NEO4J_PASSWORD", "prodsupportbuddy"),
+        ),
+    )
+
+    try:
+        pipeline = IngestionPipeline(
+            chroma_client=chroma_client,
+            es_client=es_client,
+            neo4j_driver=neo4j_driver,
+            chroma_collection=os.environ.get("CHROMA_COLLECTION", "prod_docs"),
+            es_index=os.environ.get("ELASTICSEARCH_INDEX", "prod_docs"),
+        )
+        stats = await pipeline.run(loaders)
+        print(f"Ingested {stats.chunks} chunks from {stats.documents} documents")
+    finally:
+        await neo4j_driver.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest documents into ProdSupportBuddy stores")
     parser.add_argument("--local-dir", help="Directory of local markdown/PDF runbooks")
@@ -62,28 +91,7 @@ def main() -> None:
             "--jira-jql is required"
         )
 
-    chroma_client = chromadb.HttpClient(
-        host=os.environ.get("CHROMA_HOST", "localhost"),
-        port=int(os.environ.get("CHROMA_PORT", "8000")),
-    )
-    es_client = Elasticsearch(os.environ.get("ELASTICSEARCH_URL", "http://localhost:9200"))
-    neo4j_driver = GraphDatabase.driver(
-        os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
-        auth=(
-            os.environ.get("NEO4J_USER", "neo4j"),
-            os.environ.get("NEO4J_PASSWORD", "prodsupportbuddy"),
-        ),
-    )
-
-    pipeline = IngestionPipeline(
-        chroma_client=chroma_client,
-        es_client=es_client,
-        neo4j_driver=neo4j_driver,
-        chroma_collection=os.environ.get("CHROMA_COLLECTION", "prod_docs"),
-        es_index=os.environ.get("ELASTICSEARCH_INDEX", "prod_docs"),
-    )
-    stats = pipeline.run(loaders)
-    print(f"Ingested {stats.chunks} chunks from {stats.documents} documents")
+    asyncio.run(_run(loaders))
 
 
 if __name__ == "__main__":

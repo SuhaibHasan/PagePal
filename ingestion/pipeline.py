@@ -5,12 +5,12 @@ from dataclasses import dataclass
 
 import chromadb
 from elasticsearch import Elasticsearch, helpers
-from neo4j import Driver
+from neo4j import AsyncDriver
 
 from ingestion.chunkers.text_chunker import TextChunker
 from ingestion.embedders.base import BaseEmbedder
 from ingestion.embedders.embedder import SentenceTransformerEmbedder
-from ingestion.graph_builder.builder import GraphBuilder
+from ingestion.graph_builder import GraphBuilder
 from ingestion.loaders.base import BaseLoader
 from ingestion.models import Chunk, Document
 
@@ -41,23 +41,23 @@ class IngestionPipeline:
         self,
         chroma_client: chromadb.ClientAPI,
         es_client: Elasticsearch,
-        neo4j_driver: Driver,
+        neo4j_driver: AsyncDriver,
         chroma_collection: str = "prod_docs",
         es_index: str = "prod_docs",
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         embedder: BaseEmbedder | None = None,
-        graph_workers: int = 8,
+        graph_builder: GraphBuilder | None = None,
     ) -> None:
         self._embedder = embedder or SentenceTransformerEmbedder()
         self._chunker = TextChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         self._collection = chroma_client.get_or_create_collection(chroma_collection)
         self._es_client = es_client
         self._es_index = es_index
-        self._graph_builder = GraphBuilder(neo4j_driver, max_workers=graph_workers)
+        self._graph_builder = graph_builder or GraphBuilder(neo4j_driver)
         self._ensure_es_index()
 
-    def run(self, loaders: Sequence[BaseLoader]) -> IngestionStats:
+    async def run(self, loaders: Sequence[BaseLoader]) -> IngestionStats:
         documents: list[Document] = []
         for loader in loaders:
             documents.extend(loader.load())
@@ -72,7 +72,7 @@ class IngestionPipeline:
         embeddings = self._embedder.embed([chunk.content for chunk in chunks])
         self._index_vector_store(chunks, embeddings)
         self._index_keyword_store(chunks)
-        self._graph_builder.build(documents, chunks)
+        await self._graph_builder.build(chunks)
         return IngestionStats(documents=len(documents), chunks=len(chunks))
 
     def _ensure_es_index(self) -> None:

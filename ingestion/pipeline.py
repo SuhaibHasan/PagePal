@@ -51,7 +51,11 @@ class IngestionPipeline:
     ) -> None:
         self._embedder = embedder or SentenceTransformerEmbedder()
         self._chunker = TextChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        self._collection = chroma_client.get_or_create_collection(chroma_collection)
+        # Cosine matches the unit-normalized SentenceTransformerEmbedder output; set
+        # here too since whichever caller creates the collection first fixes its space.
+        self._collection = chroma_client.get_or_create_collection(
+            chroma_collection, metadata={"hnsw:space": "cosine"}
+        )
         self._es_client = es_client
         self._es_index = es_index
         self._graph_builder = graph_builder or GraphBuilder(neo4j_driver)

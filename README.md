@@ -107,6 +107,23 @@ Relationship types: `CAUSED_BY`, `DEPENDS_ON`, `OWNED_BY`, `RESOLVED_BY`, `TRIGG
 - A chunk where extraction fails or returns no entities is skipped rather than failing the
   whole ingestion run.
 
+## Retrieval
+
+Each of the three retrievers implements the same `BaseRetriever.retrieve(query, top_k=10)`
+interface and is fused by `ReciprocalRankFusionReranker`:
+
+- **`ChromaVectorRetriever`** — embeds the query with the same `sentence-transformers`
+  (`all-MiniLM-L6-v2`) model used at ingest time and does a cosine-similarity search.
+- **`ElasticsearchKeywordRetriever`** — runs a `multi_match` BM25 query across `content`,
+  `title`, `tags`, `service`, and separately calls Claude Haiku to extract structured filters
+  from the query (`service`, `severity`, `error_code`, `date_range`), applying them as ES
+  `filter` clauses (case-insensitive `term` filters for service/severity, a phrase filter on
+  `content` for error codes since there's no dedicated field for them, and a `range` filter on
+  `incident_date`). If extraction fails, it falls back to an unfiltered BM25 search rather than
+  failing the query.
+- **`Neo4jGraphRetriever`** — matches query terms against extracted entities and hydrates
+  chunk content from Chroma (see Graph extraction above).
+
 ## UI
 
 ```bash

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import anthropic
 import chromadb
 import redis
 from elasticsearch import Elasticsearch
@@ -45,6 +46,12 @@ def get_embedder() -> SentenceTransformerEmbedder:
 
 
 @lru_cache
+def get_anthropic_client() -> anthropic.Anthropic:
+    settings = get_settings()
+    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+
+@lru_cache
 def get_vector_retriever() -> ChromaVectorRetriever:
     settings = get_settings()
     return ChromaVectorRetriever(get_chroma_client(), get_embedder(), settings.chroma_collection)
@@ -53,7 +60,11 @@ def get_vector_retriever() -> ChromaVectorRetriever:
 @lru_cache
 def get_keyword_retriever() -> ElasticsearchKeywordRetriever:
     settings = get_settings()
-    return ElasticsearchKeywordRetriever(get_elasticsearch_client(), settings.elasticsearch_index)
+    return ElasticsearchKeywordRetriever(
+        get_elasticsearch_client(),
+        settings.elasticsearch_index,
+        anthropic_client=get_anthropic_client(),
+    )
 
 
 @lru_cache

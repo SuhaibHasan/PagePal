@@ -26,8 +26,8 @@ class Settings(BaseSettings):
 
     api_cors_origins: str = "http://localhost:3000"
 
-    retrieval_top_k: int = 8
-    rerank_top_k: int = 5
+    retrieval_top_k: int = 10
+    rerank_top_k: int = 8
     cache_ttl_seconds: int = 3600
 
     @property

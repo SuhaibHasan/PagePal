@@ -11,7 +11,7 @@ from api.config import Settings
 from api.schemas import ChatResponse, SourceRef
 from retrieval.base import BaseRetriever
 from retrieval.models import RetrievalResult
-from retrieval.reranker import ReciprocalRankFusionReranker
+from retrieval.reranker import CrossEncoderReranker
 
 SYSTEM_PROMPT = (
     "You are ProdSupportBuddy, an assistant that helps engineers resolve "
@@ -25,7 +25,7 @@ class RagPipeline:
     def __init__(
         self,
         retrievers: list[BaseRetriever],
-        reranker: ReciprocalRankFusionReranker,
+        reranker: CrossEncoderReranker,
         redis_client: redis.Redis,
         settings: Settings,
     ) -> None:
@@ -47,7 +47,9 @@ class RagPipeline:
                 for retriever in self._retrievers
             )
         )
-        fused = self._reranker.rerank(list(result_lists), top_k=self._settings.rerank_top_k)
+        fused = await asyncio.to_thread(
+            self._reranker.rerank, query, list(result_lists), self._settings.rerank_top_k
+        )
 
         answer_text = await asyncio.to_thread(self._generate_answer, query, fused)
         response = ChatResponse(

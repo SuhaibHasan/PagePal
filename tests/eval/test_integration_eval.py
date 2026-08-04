@@ -5,14 +5,15 @@ import pytest
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_INTEGRATION_TESTS") != "1",
-    reason="requires docker-compose services (chromadb, elasticsearch, neo4j); set RUN_INTEGRATION_TESTS=1",
+    reason="requires docker-compose services (chromadb, elasticsearch, neo4j) plus "
+    "ANTHROPIC_API_KEY; set RUN_INTEGRATION_TESTS=1",
 )
 
 
-def test_end_to_end_ingest_and_vector_retrieve(tmp_path: Path):
+async def test_end_to_end_ingest_and_vector_retrieve(tmp_path: Path):
     import chromadb
     from elasticsearch import Elasticsearch
-    from neo4j import GraphDatabase
+    from neo4j import AsyncGraphDatabase
 
     from ingestion.embedders.embedder import SentenceTransformerEmbedder
     from ingestion.loaders.file_loader import FileLoader
@@ -26,7 +27,7 @@ def test_end_to_end_ingest_and_vector_retrieve(tmp_path: Path):
 
     chroma_client = chromadb.HttpClient(host="localhost", port=8000)
     es_client = Elasticsearch("http://localhost:9200")
-    neo4j_driver = GraphDatabase.driver(
+    neo4j_driver = AsyncGraphDatabase.driver(
         "bolt://localhost:7687", auth=("neo4j", "prodsupportbuddy")
     )
 
@@ -43,11 +44,11 @@ def test_end_to_end_ingest_and_vector_retrieve(tmp_path: Path):
     )
 
     try:
-        stats = pipeline.run([FileLoader(tmp_path)])
+        stats = await pipeline.run([FileLoader(tmp_path)])
         assert stats.chunks > 0
 
         # Re-running against the same source must not create duplicate chunks.
-        stats_again = pipeline.run([FileLoader(tmp_path)])
+        stats_again = await pipeline.run([FileLoader(tmp_path)])
         assert stats_again.chunks == stats.chunks
         assert pipeline._collection.count() == stats.chunks
 
@@ -58,4 +59,4 @@ def test_end_to_end_ingest_and_vector_retrieve(tmp_path: Path):
     finally:
         chroma_client.delete_collection(collection_name)
         es_client.indices.delete(index=index_name, ignore_unavailable=True)
-        neo4j_driver.close()
+        await neo4j_driver.close()

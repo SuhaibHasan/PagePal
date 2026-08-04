@@ -4,6 +4,7 @@ import tiktoken
 from ingestion.chunkers.text_chunker import TextChunker
 from ingestion.models import Document, SourceType
 
+
 def make_document(word_count: int, **overrides) -> Document:
     content = " ".join(f"word{i}" for i in range(word_count))
     defaults = {"id": "doc-1", "title": "Test Doc", "content": content, "source_type": SourceType.MARKDOWN}

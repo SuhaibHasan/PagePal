@@ -7,11 +7,12 @@ knowledge base and answering with a Claude model.
 ## Structure
 
 ```
-ingestion/    loaders, chunkers, embedders, and a Neo4j graph builder
+ingestion/    loaders, chunkers, embedders, and an LLM-based Neo4j graph builder
 retrieval/    vector (Chroma), keyword (Elasticsearch), and graph (Neo4j) retrievers + RRF reranker
 api/          FastAPI service exposing /chat and /health
 ui/           Next.js chat frontend
-tests/        unit tests (ingestion/retrieval) and eval tests (retrieval metrics + integration)
+tests/        unit tests, eval tests (retrieval metrics + full-stack integration),
+              and a Neo4j-testcontainer suite for the graph builder
 ```
 
 ## Prerequisites
@@ -73,12 +74,38 @@ The pipeline chunks documents with a token-aware `RecursiveCharacterTextSplitter
 
 - **ChromaDB** collection `prod_docs` — vector search
 - **Elasticsearch** index `prod_docs` — BM25 over `content`, `title`, `tags`, `severity`, `service`
-- **Neo4j** — `Document`/`Chunk`/`Entity` graph, built concurrently per document
 
 Every chunk carries `title`, `url`, `source_type`, `incident_date`, `severity`, and
-`service_tags` metadata through to all three stores. Chunk IDs are deterministic
-(`doc_id::chunk_index`), and all three stores are upserted/merged by that ID, so re-running
-the pipeline over the same sources is idempotent rather than creating duplicates.
+`service_tags` metadata through to both stores. Chunk IDs are deterministic
+(`doc_id::chunk_index`), and both stores are upserted by that ID, so re-running the
+pipeline over the same sources is idempotent rather than creating duplicates.
+
+### Graph extraction
+
+`ingestion/graph_builder.py` calls Claude Haiku once per chunk (concurrently, via an async
+Neo4j driver) to extract entities and relationships, using tool-use to force a structured
+response matching:
+
+```
+entities:      [{id, name, type}]
+relationships: [{from, to, type, description}]
+```
+
+Entity types: `SERVICE`, `ERROR_CODE`, `RUNBOOK`, `INCIDENT`, `TEAM`, `DEPENDENCY`, `CONFIG`.
+Relationship types: `CAUSED_BY`, `DEPENDS_ON`, `OWNED_BY`, `RESOLVED_BY`, `TRIGGERS`,
+`MITIGATED_BY`.
+
+- Entities are upserted as Neo4j nodes **labeled by their type** (e.g. `(:SERVICE {name: ...})`),
+  `MERGE`d on `(label, name)` so the same real-world entity dedupes across chunks/documents
+  even though the model invents a fresh local `id` on every call.
+- Relationships are upserted as typed edges (e.g. `(:ERROR_CODE)-[:CAUSED_BY]->(:SERVICE)`)
+  carrying `description` and `source_doc_id` properties.
+- Every entity is linked to its source chunk via `(entity)-[:MENTIONED_IN]->(:Chunk {id})`.
+  Neo4j only stores that `chunk_id` join key — `Neo4jGraphRetriever` hydrates the actual text
+  by looking the id up in Chroma at query time, so graph traversal and vector/keyword search
+  stay hybrid without duplicating content across stores.
+- A chunk where extraction fails or returns no entities is skipped rather than failing the
+  whole ingestion run.
 
 ## UI
 
@@ -93,5 +120,6 @@ npm run dev
 
 ```bash
 uv run pytest tests/unit             # fast, no external services
-RUN_INTEGRATION_TESTS=1 uv run pytest tests/eval  # requires docker compose services running
+uv run pytest tests/integration      # spins up a real Neo4j via testcontainers (needs Docker)
+RUN_INTEGRATION_TESTS=1 uv run pytest tests/eval  # requires docker compose services + ANTHROPIC_API_KEY
 ```

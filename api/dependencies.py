@@ -12,7 +12,7 @@ from api.config import get_settings
 from ingestion.embedders.embedder import SentenceTransformerEmbedder
 from retrieval.graph_retriever import Neo4jGraphRetriever
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
-from retrieval.reranker import ReciprocalRankFusionReranker
+from retrieval.reranker import CrossEncoderReranker
 from retrieval.vector_retriever import ChromaVectorRetriever
 
 
@@ -79,5 +79,5 @@ def get_graph_retriever() -> Neo4jGraphRetriever:
 
 
 @lru_cache
-def get_reranker() -> ReciprocalRankFusionReranker:
-    return ReciprocalRankFusionReranker()
+def get_reranker() -> CrossEncoderReranker:
+    return CrossEncoderReranker()

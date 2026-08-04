@@ -110,7 +110,7 @@ Relationship types: `CAUSED_BY`, `DEPENDS_ON`, `OWNED_BY`, `RESOLVED_BY`, `TRIGG
 ## Retrieval
 
 Each of the three retrievers implements the same `BaseRetriever.retrieve(query, top_k=10)`
-interface and is fused by `ReciprocalRankFusionReranker`:
+interface and is fused by `CrossEncoderReranker`:
 
 - **`ChromaVectorRetriever`** — embeds the query with the same `sentence-transformers`
   (`all-MiniLM-L6-v2`) model used at ingest time and does a cosine-similarity search.
@@ -131,6 +131,17 @@ interface and is fused by `ReciprocalRankFusionReranker`:
   hydrated from Chroma. Each returned chunk's content is prefixed with the path(s) that led to
   it, so the LLM sees both the causal reasoning chain and the supporting text, tagged
   `source_type="graph"`.
+
+### Reranking
+
+`CrossEncoderReranker` takes each retriever's results (up to 10 each), deduplicates by
+`chunk_id` — merging metadata and keeping the richer content when the same chunk was found by
+more than one retriever (e.g. the graph retriever's path-prefixed content wins over a plain
+vector hit) — and combines their `source_type` tags (`"vector"`, `"keyword+vector"`,
+`"graph+keyword+vector"`, ...). The deduplicated candidates are then scored directly against
+the query with `cross-encoder/ms-marco-MiniLM-L-6-v2` (`sentence-transformers`, fully local,
+no external API) and the top 8 by that score become the unified context passed to the LLM,
+each still carrying its provenance tag and metadata.
 
 ## UI
 

@@ -14,7 +14,8 @@ def test_end_to_end_ingest_and_vector_retrieve(tmp_path: Path):
     from elasticsearch import Elasticsearch
     from neo4j import GraphDatabase
 
-    from ingestion.embedders.embedder import DefaultEmbedder
+    from ingestion.embedders.embedder import SentenceTransformerEmbedder
+    from ingestion.loaders.file_loader import FileLoader
     from ingestion.pipeline import IngestionPipeline
     from retrieval.vector_retriever import ChromaVectorRetriever
 
@@ -31,19 +32,26 @@ def test_end_to_end_ingest_and_vector_retrieve(tmp_path: Path):
 
     collection_name = "eval_test_collection"
     index_name = "eval_test_index"
+    embedder = SentenceTransformerEmbedder()
     pipeline = IngestionPipeline(
         chroma_client=chroma_client,
         es_client=es_client,
         neo4j_driver=neo4j_driver,
         chroma_collection=collection_name,
         es_index=index_name,
+        embedder=embedder,
     )
 
     try:
-        chunk_count = pipeline.run(tmp_path)
-        assert chunk_count > 0
+        stats = pipeline.run([FileLoader(tmp_path)])
+        assert stats.chunks > 0
 
-        retriever = ChromaVectorRetriever(chroma_client, DefaultEmbedder(), collection_name)
+        # Re-running against the same source must not create duplicate chunks.
+        stats_again = pipeline.run([FileLoader(tmp_path)])
+        assert stats_again.chunks == stats.chunks
+        assert pipeline._collection.count() == stats.chunks
+
+        retriever = ChromaVectorRetriever(chroma_client, embedder, collection_name)
         results = retriever.retrieve("why is payment-service returning errors", top_k=3)
 
         assert any("payment-service" in result.content for result in results)

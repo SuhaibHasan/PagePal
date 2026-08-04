@@ -12,7 +12,7 @@ class ChromaVectorRetriever(BaseRetriever):
         self,
         client: chromadb.ClientAPI,
         embedder: BaseEmbedder,
-        collection_name: str = "prod_support_chunks",
+        collection_name: str = "prod_docs",
     ) -> None:
         self._embedder = embedder
         self._collection = client.get_or_create_collection(collection_name)
@@ -29,7 +29,7 @@ class ChromaVectorRetriever(BaseRetriever):
         return [
             RetrievalResult(
                 chunk_id=chunk_id,
-                document_id=(metadata or {}).get("document_id", chunk_id.split("::")[0]),
+                document_id=(metadata or {}).get("doc_id", chunk_id.split("::")[0]),
                 content=content,
                 score=1.0 - distance,
                 source_type="vector",

@@ -8,7 +8,7 @@ from elasticsearch import Elasticsearch
 from neo4j import Driver, GraphDatabase
 
 from api.config import get_settings
-from ingestion.embedders.embedder import DefaultEmbedder
+from ingestion.embedders.embedder import SentenceTransformerEmbedder
 from retrieval.graph_retriever import Neo4jGraphRetriever
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
 from retrieval.reranker import ReciprocalRankFusionReranker
@@ -40,8 +40,8 @@ def get_redis_client() -> redis.Redis:
 
 
 @lru_cache
-def get_embedder() -> DefaultEmbedder:
-    return DefaultEmbedder()
+def get_embedder() -> SentenceTransformerEmbedder:
+    return SentenceTransformerEmbedder()
 
 
 @lru_cache

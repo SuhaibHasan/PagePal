@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from sentence_transformers import SentenceTransformer
 
 from ingestion.embedders.base import BaseEmbedder
 
+MODEL_NAME = "all-MiniLM-L6-v2"
 
-class DefaultEmbedder(BaseEmbedder):
-    # Local ONNX MiniLM model bundled with chromadb - no external API key required.
+
+class SentenceTransformerEmbedder(BaseEmbedder):
+    # Fully local, no external API - the same model must be used at query time
+    # so document and query vectors land in the same embedding space.
     dimension = 384
 
-    def __init__(self) -> None:
-        self._embedding_function = DefaultEmbeddingFunction()
+    def __init__(self, model_name: str = MODEL_NAME) -> None:
+        self._model = SentenceTransformer(model_name)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [list(vector) for vector in self._embedding_function(texts)]
+        return self._model.encode(texts, normalize_embeddings=True).tolist()

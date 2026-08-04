@@ -121,8 +121,16 @@ interface and is fused by `ReciprocalRankFusionReranker`:
   `content` for error codes since there's no dedicated field for them, and a `range` filter on
   `incident_date`). If extraction fails, it falls back to an unfiltered BM25 search rather than
   failing the query.
-- **`Neo4jGraphRetriever`** — matches query terms against extracted entities and hydrates
-  chunk content from Chroma (see Graph extraction above).
+- **`Neo4jGraphRetriever`** — calls Claude Haiku to extract the services, error codes, and
+  incident identifiers mentioned in the query, then traverses up to 2 hops from those entities
+  in the semantic graph (`MATCH (n)-[r*1..2]-(m) WHERE toLower(n.name) IN $entities ...`,
+  excluding `MENTIONED_IN` hops so it stays in the entity graph rather than hopping through
+  chunks that happen to share an unrelated entity). Each subgraph path is serialized into a
+  readable arrow chain, e.g. `auth-service → DEPENDS_ON → redis-cache → CAUSED_BY →
+  INCIDENT-4521`, and every node along a path is resolved back to its source chunk_id and
+  hydrated from Chroma. Each returned chunk's content is prefixed with the path(s) that led to
+  it, so the LLM sees both the causal reasoning chain and the supporting text, tagged
+  `source_type="graph"`.
 
 ## UI
 

@@ -71,7 +71,11 @@ def get_keyword_retriever() -> ElasticsearchKeywordRetriever:
 def get_graph_retriever() -> Neo4jGraphRetriever:
     settings = get_settings()
     collection = get_chroma_client().get_or_create_collection(settings.chroma_collection)
-    return Neo4jGraphRetriever(get_neo4j_driver(), chroma_collection=collection)
+    return Neo4jGraphRetriever(
+        get_neo4j_driver(),
+        chroma_collection=collection,
+        anthropic_client=get_anthropic_client(),
+    )
 
 
 @lru_cache

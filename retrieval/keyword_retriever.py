@@ -7,7 +7,7 @@ from retrieval.models import RetrievalResult
 
 
 class ElasticsearchKeywordRetriever(BaseRetriever):
-    def __init__(self, client: Elasticsearch, index_name: str = "prod_support_chunks") -> None:
+    def __init__(self, client: Elasticsearch, index_name: str = "prod_docs") -> None:
         self._client = client
         self._index_name = index_name
 
@@ -21,11 +21,11 @@ class ElasticsearchKeywordRetriever(BaseRetriever):
         return [
             RetrievalResult(
                 chunk_id=hit["_id"],
-                document_id=hit["_source"].get("document_id", hit["_id"]),
+                document_id=hit["_source"].get("doc_id", hit["_id"]),
                 content=hit["_source"].get("content", ""),
                 score=hit["_score"],
                 source_type="keyword",
-                metadata=hit["_source"].get("metadata", {}),
+                metadata={k: v for k, v in hit["_source"].items() if k != "content"},
             )
             for hit in hits
         ]

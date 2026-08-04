@@ -48,11 +48,37 @@ uv run uvicorn api.main:app --reload --port 8080
 ## Ingest documents
 
 ```bash
-uv run python -m ingestion path/to/runbooks
+uv run python -m ingestion \
+  --local-dir path/to/runbooks \
+  --pagerduty-dir path/to/pagerduty_exports \
+  --confluence-space OPS \
+  --jira-jql "project = OPS AND created >= -30d"
 ```
 
-This loads `.md`/`.txt`/`.rst` files, chunks them, embeds and upserts chunks into ChromaDB,
-indexes them in Elasticsearch, and builds Document/Chunk/Entity relationships in Neo4j.
+Pass any combination of the four flags; each corresponds to a loader:
+
+| Flag                 | Source                                             |
+|----------------------|-----------------------------------------------------|
+| `--local-dir`        | Local `.md` / `.pdf` runbooks                       |
+| `--pagerduty-dir`    | Directory of PagerDuty incident JSON exports        |
+| `--confluence-space` | Confluence Cloud REST API (needs `CONFLUENCE_*` env)|
+| `--jira-jql`         | Jira Cloud REST API search (needs `JIRA_*` env)     |
+
+Credentials for Confluence/Jira are read from `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` /
+`CONFLUENCE_API_TOKEN` and `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` (see `.env.example`).
+
+The pipeline chunks documents with a token-aware `RecursiveCharacterTextSplitter`
+(512 tokens / 50 overlap), embeds chunks locally with `sentence-transformers`
+(`all-MiniLM-L6-v2`, no external API), and upserts into:
+
+- **ChromaDB** collection `prod_docs` — vector search
+- **Elasticsearch** index `prod_docs` — BM25 over `content`, `title`, `tags`, `severity`, `service`
+- **Neo4j** — `Document`/`Chunk`/`Entity` graph, built concurrently per document
+
+Every chunk carries `title`, `url`, `source_type`, `incident_date`, `severity`, and
+`service_tags` metadata through to all three stores. Chunk IDs are deterministic
+(`doc_id::chunk_index`), and all three stores are upserted/merged by that ID, so re-running
+the pipeline over the same sources is idempotent rather than creating duplicates.
 
 ## UI
 

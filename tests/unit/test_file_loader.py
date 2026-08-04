@@ -1,17 +1,20 @@
 from pathlib import Path
 
 from ingestion.loaders.file_loader import FileLoader
+from ingestion.models import SourceType
 
 
-def test_file_loader_loads_matching_files(tmp_path: Path):
+def test_file_loader_loads_markdown_files(tmp_path: Path):
     (tmp_path / "runbook.md").write_text("# Runbook\nRestart the payment-service.")
-    (tmp_path / "notes.txt").write_text("Investigate ERR-500 in payment-service.")
+    (tmp_path / "ignored.txt").write_text("Investigate ERR-500 in payment-service.")
     (tmp_path / "ignored.json").write_text("{}")
 
     documents = FileLoader(tmp_path).load()
 
-    sources = {document.source for document in documents}
-    assert sources == {"runbook.md", "notes.txt"}
+    assert len(documents) == 1
+    assert documents[0].title == "runbook"
+    assert documents[0].source_type == SourceType.MARKDOWN
+    assert documents[0].url == (tmp_path / "runbook.md").resolve().as_uri()
 
 
 def test_file_loader_assigns_stable_ids(tmp_path: Path):
@@ -30,4 +33,17 @@ def test_file_loader_recurses_into_subdirectories(tmp_path: Path):
 
     documents = FileLoader(tmp_path).load()
 
-    assert documents[0].source == str(Path("runbooks") / "payments" / "oncall.md")
+    assert documents[0].title == "oncall"
+
+
+def test_file_loader_skips_files_with_no_extractable_text(tmp_path: Path):
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    with (tmp_path / "blank.pdf").open("wb") as fh:
+        writer.write(fh)
+
+    documents = FileLoader(tmp_path).load()
+
+    assert documents == []

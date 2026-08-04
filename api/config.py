@@ -13,10 +13,10 @@ class Settings(BaseSettings):
 
     chroma_host: str = "localhost"
     chroma_port: int = 8000
-    chroma_collection: str = "prod_support_chunks"
+    chroma_collection: str = "prod_docs"
 
     elasticsearch_url: str = "http://localhost:9200"
-    elasticsearch_index: str = "prod_support_chunks"
+    elasticsearch_index: str = "prod_docs"
 
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"

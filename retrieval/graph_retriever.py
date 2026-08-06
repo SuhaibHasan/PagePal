@@ -108,20 +108,27 @@ class Neo4jGraphRetriever(BaseRetriever):
             logger.warning("Entity extraction failed for %r: %s", query, exc)
             return []
 
-    def _hydrate_contents(self, chunk_ids: list[str]) -> dict[str, str]:
+    def _hydrate_chunks(self, chunk_ids: list[str]) -> dict[str, dict]:
         if self._chroma_collection is None or not chunk_ids:
             return {}
         result = self._chroma_collection.get(ids=chunk_ids)
-        return dict(zip(result.get("ids", []), result.get("documents", []), strict=False))
+        ids = result.get("ids", [])
+        documents = result.get("documents", [])
+        metadatas = result.get("metadatas", [])
+        return {
+            chunk_id: {"content": document, "metadata": metadata or {}}
+            for chunk_id, document, metadata in zip(ids, documents, metadatas, strict=False)
+        }
 
     def _to_results(self, chunks_by_id: dict[str, _ChunkPaths], top_k: int) -> list[RetrievalResult]:
-        contents = self._hydrate_contents(list(chunks_by_id.keys()))
+        chunks = self._hydrate_chunks(list(chunks_by_id.keys()))
         ranked = sorted(chunks_by_id.items(), key=lambda item: len(item[1].paths), reverse=True)
 
         results = []
         for chunk_id, info in ranked[:top_k]:
             path_text = "\n".join(sorted(info.paths))
-            chunk_text = contents.get(chunk_id, "")
+            hydrated = chunks.get(chunk_id, {})
+            chunk_text = hydrated.get("content", "")
             content = f"{path_text}\n\n{chunk_text}".strip() if chunk_text else path_text
             results.append(
                 RetrievalResult(
@@ -131,6 +138,10 @@ class Neo4jGraphRetriever(BaseRetriever):
                     score=float(len(info.paths)),
                     source_type="graph",
                     metadata={
+                        # title/url come from Chroma so pure-graph citations are
+                        # still resolvable to a human-readable source, not just paths.
+                        "title": hydrated.get("metadata", {}).get("title"),
+                        "url": hydrated.get("metadata", {}).get("url"),
                         "matched_entities": sorted(info.entity_names),
                         "graph_paths": sorted(info.paths),
                     },

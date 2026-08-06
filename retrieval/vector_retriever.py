@@ -25,7 +25,12 @@ class ChromaVectorRetriever(BaseRetriever):
             collection_name, metadata={"hnsw:space": "cosine"}
         )
 
-    def retrieve(self, query: str, top_k: int = 10) -> list[RetrievalResult]:
+    def retrieve(
+        self, query: str, top_k: int = 10, filters: dict[str, str] | None = None
+    ) -> list[RetrievalResult]:
+        # Structured service/severity filters only apply to keyword search today;
+        # accepted here (and ignored) purely to satisfy the shared retriever interface.
+        del filters
         query_embedding = self._embedder.embed([query])[0]
         results = self._collection.query(query_embeddings=[query_embedding], n_results=top_k)
 

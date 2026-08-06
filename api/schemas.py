@@ -1,20 +1,48 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from retrieval.answer_generator import Citation
+
+class ChatFilters(BaseModel):
+    service: str | None = None
+    severity: str | None = None
 
 
 class ChatRequest(BaseModel):
-    message: str
     session_id: str | None = None
+    message: str
+    filters: ChatFilters | None = None
 
 
-class ChatResponse(BaseModel):
-    answer: str
-    citations: list[Citation] = Field(default_factory=list)
+class IngestRequest(BaseModel):
+    source_type: Literal["local", "confluence", "pagerduty", "jira"]
+    path: str | None = None  # local runbooks dir, or pagerduty export dir
+    space_key: str | None = None  # confluence
+    jql: str | None = None  # jira
+
+
+class IngestResponse(BaseModel):
+    status: str
+    source_type: str
+
+
+class GraphNode(BaseModel):
+    id: str
+    name: str
+    labels: list[str]
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    type: str
+
+
+class SubgraphResponse(BaseModel):
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
 
 
 class HealthStatus(BaseModel):

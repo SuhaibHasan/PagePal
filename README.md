@@ -8,8 +8,9 @@ knowledge base and answering with a Claude model.
 
 ```
 ingestion/    loaders, chunkers, embedders, and an LLM-based Neo4j graph builder
-retrieval/    vector (Chroma), keyword (Elasticsearch), and graph (Neo4j) retrievers + RRF reranker
-api/          FastAPI service exposing /chat and /health
+retrieval/    vector (Chroma), keyword (Elasticsearch), and graph (Neo4j) retrievers,
+              a cross-encoder reranker, and the streaming answer generator
+api/          FastAPI service: streaming /chat, /ingest, /graph/explore, /health
 ui/           Next.js chat frontend
 tests/        unit tests, eval tests (retrieval metrics + full-stack integration),
               and a Neo4j-testcontainer suite for the graph builder
@@ -46,6 +47,55 @@ uv sync
 uv run uvicorn api.main:app --reload --port 8080
 ```
 
+### Endpoints
+
+**`POST /chat`** — `{ session_id?, message, filters?: { service?, severity? } }`, streamed back as
+Server-Sent Events:
+
+```
+event: session
+data: {"session_id": "..."}
+
+event: token
+data: {"text": "Restart "}
+
+event: token
+data: {"text": "the payment-service pods."}
+
+event: citations
+data: {"citations": [{"title": "...", "url": "...", "retrieval_path": "graph+keyword", "graph_path": "..."}]}
+
+event: done
+data: {}
+```
+
+A missing `session_id` is generated server-side and echoed back in the first event so the
+client can persist it for follow-up turns. `filters.service`/`filters.severity` are passed to
+the keyword retriever and take precedence over whatever it infers from the query text itself
+(see Retrieval below). Conversation history is stored in Redis per `session_id` with a 1-hour
+TTL, and the last 5 turns are included in every prompt for follow-up context. Each session is
+rate-limited to 10 requests/minute via a Redis sorted-set sliding window; requests beyond that
+get `429`.
+
+**`POST /ingest`** — `{ source_type: "local"|"confluence"|"pagerduty"|"jira", path?, space_key?, jql? }`
+kicks off ingestion + graph building for one source as a FastAPI background task and returns
+`202` immediately (`path` is required for `local`/`pagerduty`; Confluence/Jira credentials come
+from `.env`).
+
+**`GET /graph/explore?entity_name=auth-service`** — returns the 2-hop subgraph around a named
+entity as `{ nodes: [{id, name, labels}], edges: [{source, target, type}] }` for frontend graph
+visualization (no LLM call — the entity name is taken literally, unlike `/chat`'s retrieval).
+
+**`GET /health`** — pings ChromaDB, Elasticsearch, Neo4j, and Redis; `200` with per-service
+`ok`/`error: ...` status and an overall `ok`/`degraded`.
+
+### Tracing
+
+Every `/chat` request is wrapped in nested OpenTelemetry spans: `query_routing` (the whole
+request) → `retrieval.vector` / `retrieval.keyword` / `retrieval.graph` (run concurrently) →
+`reranking` → `llm_call`. Spans print to the console by default (`api/telemetry.py`) — swap in
+an OTLP exporter there to ship to a real collector.
+
 ## Ingest documents
 
 ```bash
@@ -67,6 +117,7 @@ Pass any combination of the four flags; each corresponds to a loader:
 
 Credentials for Confluence/Jira are read from `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` /
 `CONFLUENCE_API_TOKEN` and `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` (see `.env.example`).
+The same loaders and credentials back `POST /ingest`.
 
 The pipeline chunks documents with a token-aware `RecursiveCharacterTextSplitter`
 (512 tokens / 50 overlap), embeds chunks locally with `sentence-transformers`
@@ -109,8 +160,10 @@ Relationship types: `CAUSED_BY`, `DEPENDS_ON`, `OWNED_BY`, `RESOLVED_BY`, `TRIGG
 
 ## Retrieval
 
-Each of the three retrievers implements the same `BaseRetriever.retrieve(query, top_k=10)`
-interface and is fused by `CrossEncoderReranker`:
+Each of the three retrievers implements the same
+`BaseRetriever.retrieve(query, top_k=10, filters=None)` interface and is fused by
+`CrossEncoderReranker`. `filters` is only meaningful to the keyword retriever (vector/graph
+accept and ignore it); it's how `POST /chat`'s `filters.service`/`filters.severity` reach ES.
 
 - **`ChromaVectorRetriever`** — embeds the query with the same `sentence-transformers`
   (`all-MiniLM-L6-v2`) model used at ingest time and does a cosine-similarity search.
@@ -119,7 +172,8 @@ interface and is fused by `CrossEncoderReranker`:
   from the query (`service`, `severity`, `error_code`, `date_range`), applying them as ES
   `filter` clauses (case-insensitive `term` filters for service/severity, a phrase filter on
   `content` for error codes since there's no dedicated field for them, and a `range` filter on
-  `incident_date`). If extraction fails, it falls back to an unfiltered BM25 search rather than
+  `incident_date`). Explicit `filters` from the request override the LLM's guess for
+  service/severity. If extraction fails, it falls back to an unfiltered BM25 search rather than
   failing the query.
 - **`Neo4jGraphRetriever`** — calls Claude Haiku to extract the services, error codes, and
   incident identifiers mentioned in the query, then traverses up to 2 hops from those entities
@@ -130,7 +184,10 @@ interface and is fused by `CrossEncoderReranker`:
   INCIDENT-4521`, and every node along a path is resolved back to its source chunk_id and
   hydrated from Chroma. Each returned chunk's content is prefixed with the path(s) that led to
   it, so the LLM sees both the causal reasoning chain and the supporting text, tagged
-  `source_type="graph"`.
+  `source_type="graph"`. It also exposes `explore_subgraph(entity_name)`, used by
+  `GET /graph/explore` — the same 2-hop/no-`MENTIONED_IN` traversal, but keyed on a literal
+  entity name (no LLM extraction) and returned as raw nodes/edges rather than serialized paths
+  or hydrated chunks, since that's what a visualization needs instead.
 
 ### Reranking
 
@@ -149,12 +206,18 @@ each still carrying its provenance tag and metadata.
 from the reranked context: each of the top 8 chunks becomes `[Source N]: <content>`, and any
 `graph_paths` carried in their metadata are collected (deduped) into a separate `[Graph
 Context]:` section so the model can reason over causal chains distinctly from raw evidence
-text. The response streams via `client.messages.stream(...)`. Its system prompt instructs the
-model to answer only from context and cite sources as `[Source N]`; after the answer streams
-back, those citation markers are parsed out of the text and mapped back to each chunk's
-`title`, `url`, and `retrieval_path` (the same provenance tag the reranker produced, e.g.
-`"graph+keyword"`), plus `graph_path` when the cited chunk came from the graph retriever. Only
-sources the model actually cited are returned — not every chunk that was in context.
+text. Its system prompt instructs the model to answer only from context and cite sources as
+`[Source N]`; after the answer streams back, those citation markers are parsed out of the text
+and mapped back to each chunk's `title`, `url`, and `retrieval_path` (the same provenance tag
+the reranker produced, e.g. `"graph+keyword"`), plus `graph_path` when the cited chunk came
+from the graph retriever. Only sources the model actually cited are returned — not every chunk
+that was in context.
+
+`astream_answer(query, context, history)` (used by `POST /chat`) streams token-by-token via
+`AsyncAnthropic.messages.stream(...)` for real-time SSE delivery, prepending up to 5 prior
+`(user, assistant)` turns from Redis before the new message so follow-up questions keep
+context. `generate(...)` is the synchronous, non-streaming equivalent (used by tests and
+anything that just wants the final answer back).
 
 ## UI
 

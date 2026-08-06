@@ -36,9 +36,10 @@ def _entities_client(entities: list[str]) -> _FakeAnthropicClient:
 
 
 class _FakeNode:
-    def __init__(self, element_id: str, name: str) -> None:
+    def __init__(self, element_id: str, name: str, labels: frozenset[str] | None = None) -> None:
         self.element_id = element_id
         self._name = name
+        self.labels = labels or frozenset()
 
     def get(self, key, default=None):
         return self._name if key == "name" else default
@@ -228,3 +229,51 @@ def test_ping_verifies_connectivity():
     retriever.ping()
 
     assert driver.pinged is True
+
+
+def test_retrieve_accepts_and_ignores_filters_argument():
+    driver = _FakeDriver(responses=[[], []])
+    retriever = Neo4jGraphRetriever(driver, anthropic_client=_entities_client(["payment-service"]))
+
+    results = retriever.retrieve("payment-service issues", filters={"service": "payment-service"})
+
+    assert results == []
+
+
+def test_explore_subgraph_returns_nodes_and_edges_for_visualization():
+    auth = _FakeNode("n1", "auth-service", labels=frozenset({"SERVICE"}))
+    redis = _FakeNode("n2", "redis-cache", labels=frozenset({"DEPENDENCY"}))
+    incident = _FakeNode("n3", "INCIDENT-4521", labels=frozenset({"INCIDENT"}))
+
+    traversal_response = [
+        {"n": auth, "r": [_FakeRelationship(auth, redis, "DEPENDS_ON")], "m": redis},
+        {
+            "n": auth,
+            "r": [
+                _FakeRelationship(auth, redis, "DEPENDS_ON"),
+                _FakeRelationship(redis, incident, "CAUSED_BY"),
+            ],
+            "m": incident,
+        },
+    ]
+    driver = _FakeDriver(responses=[traversal_response])
+    retriever = Neo4jGraphRetriever(driver, anthropic_client=_entities_client([]))
+
+    subgraph = retriever.explore_subgraph("auth-service")
+
+    node_ids = {node["id"] for node in subgraph["nodes"]}
+    assert node_ids == {"auth-service", "redis-cache", "INCIDENT-4521"}
+    auth_node = next(node for node in subgraph["nodes"] if node["id"] == "auth-service")
+    assert auth_node["labels"] == ["SERVICE"]
+
+    assert {"source": "auth-service", "target": "redis-cache", "type": "DEPENDS_ON"} in subgraph["edges"]
+    assert {"source": "redis-cache", "target": "INCIDENT-4521", "type": "CAUSED_BY"} in subgraph["edges"]
+    # the DEPENDS_ON edge appears in both traversal rows but must not be duplicated
+    assert len(subgraph["edges"]) == 2
+
+
+def test_explore_subgraph_returns_empty_when_entity_not_found():
+    driver = _FakeDriver(responses=[[]])
+    retriever = Neo4jGraphRetriever(driver, anthropic_client=_entities_client([]))
+
+    assert retriever.explore_subgraph("unknown-entity") == {"nodes": [], "edges": []}

@@ -28,7 +28,14 @@ class Settings(BaseSettings):
 
     retrieval_top_k: int = 10
     rerank_top_k: int = 8
-    cache_ttl_seconds: int = 3600
+
+    # Only needed for POST /ingest requests targeting these sources.
+    confluence_base_url: str = ""
+    confluence_email: str = ""
+    confluence_api_token: str = ""
+    jira_base_url: str = ""
+    jira_email: str = ""
+    jira_api_token: str = ""
 
     @property
     def cors_origins_list(self) -> list[str]:

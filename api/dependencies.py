@@ -6,10 +6,12 @@ import anthropic
 import chromadb
 import redis
 from elasticsearch import Elasticsearch
-from neo4j import Driver, GraphDatabase
+from neo4j import AsyncDriver, AsyncGraphDatabase, Driver, GraphDatabase
 
 from api.config import get_settings
 from ingestion.embedders.embedder import SentenceTransformerEmbedder
+from ingestion.graph_builder import GraphBuilder
+from ingestion.pipeline import IngestionPipeline
 from retrieval.answer_generator import AnswerGenerator
 from retrieval.graph_retriever import Neo4jGraphRetriever
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
@@ -36,6 +38,17 @@ def get_neo4j_driver() -> Driver:
 
 
 @lru_cache
+def get_async_neo4j_driver() -> AsyncDriver:
+    # Separate from get_neo4j_driver(): ingestion's graph builder needs an
+    # async session, retrieval's graph traversal doesn't. Both point at the
+    # same Neo4j instance.
+    settings = get_settings()
+    return AsyncGraphDatabase.driver(
+        settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password)
+    )
+
+
+@lru_cache
 def get_redis_client() -> redis.Redis:
     settings = get_settings()
     return redis.Redis.from_url(settings.redis_url, decode_responses=True)
@@ -50,6 +63,12 @@ def get_embedder() -> SentenceTransformerEmbedder:
 def get_anthropic_client() -> anthropic.Anthropic:
     settings = get_settings()
     return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+
+@lru_cache
+def get_async_anthropic_client() -> anthropic.AsyncAnthropic:
+    settings = get_settings()
+    return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 @lru_cache
@@ -87,4 +106,24 @@ def get_reranker() -> CrossEncoderReranker:
 @lru_cache
 def get_answer_generator() -> AnswerGenerator:
     settings = get_settings()
-    return AnswerGenerator(anthropic_client=get_anthropic_client(), model=settings.anthropic_model)
+    return AnswerGenerator(
+        anthropic_client=get_anthropic_client(),
+        async_anthropic_client=get_async_anthropic_client(),
+        model=settings.anthropic_model,
+    )
+
+
+@lru_cache
+def get_ingestion_pipeline() -> IngestionPipeline:
+    settings = get_settings()
+    graph_builder = GraphBuilder(
+        get_async_neo4j_driver(), anthropic_client=get_async_anthropic_client()
+    )
+    return IngestionPipeline(
+        chroma_client=get_chroma_client(),
+        es_client=get_elasticsearch_client(),
+        neo4j_driver=get_async_neo4j_driver(),
+        chroma_collection=settings.chroma_collection,
+        es_index=settings.elasticsearch_index,
+        graph_builder=graph_builder,
+    )

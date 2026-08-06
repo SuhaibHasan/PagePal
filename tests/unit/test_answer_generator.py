@@ -34,6 +34,38 @@ class _FakeAnthropicClient:
         self.messages = _FakeMessages([answer_text[:midpoint], answer_text[midpoint:]])
 
 
+async def _async_iter(items: list[str]):
+    for item in items:
+        yield item
+
+
+class _FakeAsyncStreamContext:
+    def __init__(self, text_chunks: list[str]) -> None:
+        self.text_stream = _async_iter(text_chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeAsyncMessages:
+    def __init__(self, text_chunks: list[str]) -> None:
+        self._text_chunks = text_chunks
+        self.stream_calls: list[dict] = []
+
+    def stream(self, **kwargs):
+        self.stream_calls.append(kwargs)
+        return _FakeAsyncStreamContext(self._text_chunks)
+
+
+class _FakeAsyncAnthropicClient:
+    def __init__(self, answer_text: str) -> None:
+        midpoint = max(1, len(answer_text) // 2)
+        self.messages = _FakeAsyncMessages([answer_text[:midpoint], answer_text[midpoint:]])
+
+
 def make_result(chunk_id: str, source_type: str, content: str = "chunk text", **metadata) -> RetrievalResult:
     return RetrievalResult(
         chunk_id=chunk_id,
@@ -189,3 +221,68 @@ def test_generate_returns_no_citations_when_answer_cites_nothing():
     result = generator.generate("query", [make_result("a::0", "vector")])
 
     assert result.citations == []
+
+
+def test_generate_prepends_history_before_the_new_user_message():
+    client = _FakeAnthropicClient("answer")
+    generator = AnswerGenerator(anthropic_client=client)
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+    ]
+
+    generator.generate("follow-up question", [make_result("a::0", "vector")], history=history)
+
+    sent_messages = client.messages.stream_calls[0]["messages"]
+    assert sent_messages[0] == {"role": "user", "content": "earlier question"}
+    assert sent_messages[1] == {"role": "assistant", "content": "earlier answer"}
+    assert sent_messages[2]["role"] == "user"
+    assert "follow-up question" in sent_messages[2]["content"]
+
+
+def test_generate_with_no_history_sends_only_the_new_message():
+    client = _FakeAnthropicClient("answer")
+    generator = AnswerGenerator(anthropic_client=client)
+
+    generator.generate("query", [make_result("a::0", "vector")])
+
+    assert len(client.messages.stream_calls[0]["messages"]) == 1
+
+
+async def test_astream_answer_yields_text_chunks_as_they_arrive():
+    async_client = _FakeAsyncAnthropicClient("Restart the payment-service pods.")
+    generator = AnswerGenerator(
+        anthropic_client=_FakeAnthropicClient(""), async_anthropic_client=async_client
+    )
+
+    chunks = [
+        chunk
+        async for chunk in generator.astream_answer("query", [make_result("a::0", "vector")])
+    ]
+
+    assert "".join(chunks) == "Restart the payment-service pods."
+
+
+async def test_astream_answer_includes_graph_context_and_history():
+    async_client = _FakeAsyncAnthropicClient("answer")
+    generator = AnswerGenerator(
+        anthropic_client=_FakeAnthropicClient(""), async_anthropic_client=async_client
+    )
+    context = [make_result("a::0", "graph", graph_paths=["auth-service → DEPENDS_ON → redis-cache"])]
+    history = [{"role": "user", "content": "earlier question"}, {"role": "assistant", "content": "earlier answer"}]
+
+    async for _ in generator.astream_answer("query", context, history=history):
+        pass
+
+    call = async_client.messages.stream_calls[0]
+    assert call["messages"][0] == {"role": "user", "content": "earlier question"}
+    assert "[Graph Context]:\nauth-service → DEPENDS_ON → redis-cache" in call["messages"][-1]["content"]
+
+
+def test_build_citations_can_be_called_independently_after_streaming():
+    generator = AnswerGenerator(anthropic_client=_FakeAnthropicClient(""))
+    context = [make_result("a::0", "vector", title="Runbook", url="https://x/a")]
+
+    citations = generator.build_citations("See [Source 1].", generator.top_context(context))
+
+    assert citations[0].title == "Runbook"

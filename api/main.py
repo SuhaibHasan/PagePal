@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.config import Settings, get_settings
 from api.dependencies import (
+    get_answer_generator,
     get_graph_retriever,
     get_keyword_retriever,
     get_redis_client,
@@ -19,6 +20,7 @@ def get_rag_pipeline(settings: Settings = Depends(get_settings)) -> RagPipeline:
     return RagPipeline(
         retrievers=[get_vector_retriever(), get_keyword_retriever(), get_graph_retriever()],
         reranker=get_reranker(),
+        answer_generator=get_answer_generator(),
         redis_client=get_redis_client(),
         settings=settings,
     )

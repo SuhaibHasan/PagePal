@@ -4,23 +4,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from retrieval.answer_generator import Citation
+
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
 
 
-class SourceRef(BaseModel):
-    document_id: str
-    chunk_id: str
-    content_snippet: str
-    score: float
-    source_type: str
-
-
 class ChatResponse(BaseModel):
     answer: str
-    sources: list[SourceRef] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class HealthStatus(BaseModel):

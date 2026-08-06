@@ -10,6 +10,7 @@ from neo4j import Driver, GraphDatabase
 
 from api.config import get_settings
 from ingestion.embedders.embedder import SentenceTransformerEmbedder
+from retrieval.answer_generator import AnswerGenerator
 from retrieval.graph_retriever import Neo4jGraphRetriever
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
 from retrieval.reranker import CrossEncoderReranker
@@ -81,3 +82,9 @@ def get_graph_retriever() -> Neo4jGraphRetriever:
 @lru_cache
 def get_reranker() -> CrossEncoderReranker:
     return CrossEncoderReranker()
+
+
+@lru_cache
+def get_answer_generator() -> AnswerGenerator:
+    settings = get_settings()
+    return AnswerGenerator(anthropic_client=get_anthropic_client(), model=settings.anthropic_model)

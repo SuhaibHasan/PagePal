@@ -143,6 +143,19 @@ the query with `cross-encoder/ms-marco-MiniLM-L-6-v2` (`sentence-transformers`, 
 no external API) and the top 8 by that score become the unified context passed to the LLM,
 each still carrying its provenance tag and metadata.
 
+### Answer generation
+
+`AnswerGenerator` (`retrieval/answer_generator.py`) builds the final prompt to Claude Sonnet
+from the reranked context: each of the top 8 chunks becomes `[Source N]: <content>`, and any
+`graph_paths` carried in their metadata are collected (deduped) into a separate `[Graph
+Context]:` section so the model can reason over causal chains distinctly from raw evidence
+text. The response streams via `client.messages.stream(...)`. Its system prompt instructs the
+model to answer only from context and cite sources as `[Source N]`; after the answer streams
+back, those citation markers are parsed out of the text and mapped back to each chunk's
+`title`, `url`, and `retrieval_path` (the same provenance tag the reranker produced, e.g.
+`"graph+keyword"`), plus `graph_path` when the cited chunk came from the graph retriever. Only
+sources the model actually cited are returned — not every chunk that was in context.
+
 ## UI
 
 ```bash

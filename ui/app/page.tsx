@@ -2,18 +2,17 @@
 
 import { FormEvent, useState } from "react";
 
-type Source = {
-  document_id: string;
-  chunk_id: string;
-  content_snippet: string;
-  score: number;
-  source_type: string;
+type Citation = {
+  title: string | null;
+  url: string | null;
+  retrieval_path: string;
+  graph_path: string | null;
 };
 
 type Message = {
   role: "user" | "assistant";
   content: string;
-  sources?: Source[];
+  citations?: Citation[];
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
@@ -44,7 +43,7 @@ export default function ChatPage() {
       const data = await response.json();
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: data.answer, sources: data.sources },
+        { role: "assistant", content: data.answer, citations: data.citations },
       ]);
     } catch (error) {
       setMessages((prev) => [
@@ -63,11 +62,21 @@ export default function ChatPage() {
         {messages.map((message, index) => (
           <div key={index} className={`message ${message.role}`}>
             <p>{message.content}</p>
-            {message.sources && message.sources.length > 0 && (
+            {message.citations && message.citations.length > 0 && (
               <ul className="sources">
-                {message.sources.map((source) => (
-                  <li key={source.chunk_id}>
-                    [{source.source_type}] {source.content_snippet}
+                {message.citations.map((citation, citationIndex) => (
+                  <li key={citationIndex}>
+                    [{citation.retrieval_path}]{" "}
+                    {citation.url ? (
+                      <a href={citation.url} target="_blank" rel="noreferrer">
+                        {citation.title ?? citation.url}
+                      </a>
+                    ) : (
+                      (citation.title ?? "Untitled source")
+                    )}
+                    {citation.graph_path && (
+                      <div className="graph-path">{citation.graph_path}</div>
+                    )}
                   </li>
                 ))}
               </ul>

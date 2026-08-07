@@ -36,9 +36,10 @@ def _entities_client(entities: list[str]) -> _FakeAnthropicClient:
 
 
 class _FakeNode:
-    def __init__(self, element_id: str, name: str) -> None:
+    def __init__(self, element_id: str, name: str, labels: frozenset[str] | None = None) -> None:
         self.element_id = element_id
         self._name = name
+        self.labels = labels or frozenset()
 
     def get(self, key, default=None):
         return self._name if key == "name" else default
@@ -82,16 +83,18 @@ class _FakeDriver:
 
 
 class _FakeChromaCollection:
-    def __init__(self, documents_by_id: dict[str, str]) -> None:
+    def __init__(self, documents_by_id: dict[str, str], metadata_by_id: dict[str, dict] | None = None) -> None:
         self._documents_by_id = documents_by_id
+        self._metadata_by_id = metadata_by_id or {}
         self.get_calls: list[list[str]] = []
 
     def get(self, ids):
         self.get_calls.append(ids)
-        found = [(chunk_id, self._documents_by_id[chunk_id]) for chunk_id in ids if chunk_id in self._documents_by_id]
+        found_ids = [chunk_id for chunk_id in ids if chunk_id in self._documents_by_id]
         return {
-            "ids": [chunk_id for chunk_id, _ in found],
-            "documents": [doc for _, doc in found],
+            "ids": found_ids,
+            "documents": [self._documents_by_id[chunk_id] for chunk_id in found_ids],
+            "metadatas": [self._metadata_by_id.get(chunk_id, {}) for chunk_id in found_ids],
         }
 
 
@@ -144,6 +147,26 @@ def test_retrieve_serializes_two_hop_path_and_hydrates_linked_chunk():
     assert "Restart redis-cache" in result.content
     assert set(result.metadata["matched_entities"]) == {"redis-cache", "INCIDENT-4521"}
     assert result.score == 2.0
+
+
+def test_retrieve_includes_title_and_url_from_chroma_metadata():
+    auth = _FakeNode("n1", "auth-service")
+    redis = _FakeNode("n2", "redis-cache")
+    traversal_response = [{"n": auth, "r": [_FakeRelationship(auth, redis, "DEPENDS_ON")], "m": redis}]
+    chunk_lookup_response = [{"entity_name": "redis-cache", "chunk_id": "pd-1::0", "document_id": "pd-1"}]
+    driver = _FakeDriver(responses=[traversal_response, chunk_lookup_response])
+    chroma = _FakeChromaCollection(
+        {"pd-1::0": "Restart redis-cache."},
+        {"pd-1::0": {"title": "Redis Runbook", "url": "https://runbooks.example.com/redis"}},
+    )
+    retriever = Neo4jGraphRetriever(
+        driver, chroma_collection=chroma, anthropic_client=_entities_client(["auth-service"])
+    )
+
+    results = retriever.retrieve("auth-service dependencies")
+
+    assert results[0].metadata["title"] == "Redis Runbook"
+    assert results[0].metadata["url"] == "https://runbooks.example.com/redis"
 
 
 def test_retrieve_excludes_mentioned_in_hops_from_traversal_query():
@@ -206,3 +229,51 @@ def test_ping_verifies_connectivity():
     retriever.ping()
 
     assert driver.pinged is True
+
+
+def test_retrieve_accepts_and_ignores_filters_argument():
+    driver = _FakeDriver(responses=[[], []])
+    retriever = Neo4jGraphRetriever(driver, anthropic_client=_entities_client(["payment-service"]))
+
+    results = retriever.retrieve("payment-service issues", filters={"service": "payment-service"})
+
+    assert results == []
+
+
+def test_explore_subgraph_returns_nodes_and_edges_for_visualization():
+    auth = _FakeNode("n1", "auth-service", labels=frozenset({"SERVICE"}))
+    redis = _FakeNode("n2", "redis-cache", labels=frozenset({"DEPENDENCY"}))
+    incident = _FakeNode("n3", "INCIDENT-4521", labels=frozenset({"INCIDENT"}))
+
+    traversal_response = [
+        {"n": auth, "r": [_FakeRelationship(auth, redis, "DEPENDS_ON")], "m": redis},
+        {
+            "n": auth,
+            "r": [
+                _FakeRelationship(auth, redis, "DEPENDS_ON"),
+                _FakeRelationship(redis, incident, "CAUSED_BY"),
+            ],
+            "m": incident,
+        },
+    ]
+    driver = _FakeDriver(responses=[traversal_response])
+    retriever = Neo4jGraphRetriever(driver, anthropic_client=_entities_client([]))
+
+    subgraph = retriever.explore_subgraph("auth-service")
+
+    node_ids = {node["id"] for node in subgraph["nodes"]}
+    assert node_ids == {"auth-service", "redis-cache", "INCIDENT-4521"}
+    auth_node = next(node for node in subgraph["nodes"] if node["id"] == "auth-service")
+    assert auth_node["labels"] == ["SERVICE"]
+
+    assert {"source": "auth-service", "target": "redis-cache", "type": "DEPENDS_ON"} in subgraph["edges"]
+    assert {"source": "redis-cache", "target": "INCIDENT-4521", "type": "CAUSED_BY"} in subgraph["edges"]
+    # the DEPENDS_ON edge appears in both traversal rows but must not be duplicated
+    assert len(subgraph["edges"]) == 2
+
+
+def test_explore_subgraph_returns_empty_when_entity_not_found():
+    driver = _FakeDriver(responses=[[]])
+    retriever = Neo4jGraphRetriever(driver, anthropic_client=_entities_client([]))
+
+    assert retriever.explore_subgraph("unknown-entity") == {"nodes": [], "edges": []}

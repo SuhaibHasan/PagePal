@@ -66,7 +66,12 @@ class Neo4jGraphRetriever(BaseRetriever):
         self._llm = anthropic_client or anthropic.Anthropic()
         self._model = model
 
-    def retrieve(self, query: str, top_k: int = 10) -> list[RetrievalResult]:
+    def retrieve(
+        self, query: str, top_k: int = 10, filters: dict[str, str] | None = None
+    ) -> list[RetrievalResult]:
+        # Accepted (and ignored) purely to satisfy the shared retriever interface;
+        # entity matching here comes from the query text, not structured filters.
+        del filters
         entities = self._extract_entities(query)
         if not entities:
             return []
@@ -91,6 +96,42 @@ class Neo4jGraphRetriever(BaseRetriever):
     def ping(self) -> None:
         self._driver.verify_connectivity()
 
+    def explore_subgraph(self, entity_name: str) -> dict:
+        # For visualization: unlike retrieve(), this takes the entity name
+        # literally (no LLM extraction) and returns raw graph structure rather
+        # than serialized text paths or hydrated chunk content.
+        with self._driver.session() as session:
+            path_rows = session.execute_read(self._traverse_subgraph, [entity_name], 100)
+
+        nodes: dict[str, dict] = {}
+        edges: list[dict] = []
+        seen_edges: set[tuple[str, str, str]] = set()
+
+        for record in path_rows:
+            current = record["n"]
+            nodes.setdefault(current.element_id, self._node_to_dict(current))
+            for rel in record["r"]:
+                next_node = rel.end_node if rel.start_node.element_id == current.element_id else rel.start_node
+                nodes.setdefault(next_node.element_id, self._node_to_dict(next_node))
+
+                edge_key = (current.element_id, next_node.element_id, rel.type)
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    edges.append(
+                        {
+                            "source": current.get("name", "?"),
+                            "target": next_node.get("name", "?"),
+                            "type": rel.type,
+                        }
+                    )
+                current = next_node
+
+        return {"nodes": list(nodes.values()), "edges": edges}
+
+    @staticmethod
+    def _node_to_dict(node) -> dict:
+        return {"id": node.get("name", "?"), "name": node.get("name", "?"), "labels": list(node.labels)}
+
     def _extract_entities(self, query: str) -> list[str]:
         try:
             response = self._llm.messages.create(
@@ -108,20 +149,27 @@ class Neo4jGraphRetriever(BaseRetriever):
             logger.warning("Entity extraction failed for %r: %s", query, exc)
             return []
 
-    def _hydrate_contents(self, chunk_ids: list[str]) -> dict[str, str]:
+    def _hydrate_chunks(self, chunk_ids: list[str]) -> dict[str, dict]:
         if self._chroma_collection is None or not chunk_ids:
             return {}
         result = self._chroma_collection.get(ids=chunk_ids)
-        return dict(zip(result.get("ids", []), result.get("documents", []), strict=False))
+        ids = result.get("ids", [])
+        documents = result.get("documents", [])
+        metadatas = result.get("metadatas", [])
+        return {
+            chunk_id: {"content": document, "metadata": metadata or {}}
+            for chunk_id, document, metadata in zip(ids, documents, metadatas, strict=False)
+        }
 
     def _to_results(self, chunks_by_id: dict[str, _ChunkPaths], top_k: int) -> list[RetrievalResult]:
-        contents = self._hydrate_contents(list(chunks_by_id.keys()))
+        chunks = self._hydrate_chunks(list(chunks_by_id.keys()))
         ranked = sorted(chunks_by_id.items(), key=lambda item: len(item[1].paths), reverse=True)
 
         results = []
         for chunk_id, info in ranked[:top_k]:
             path_text = "\n".join(sorted(info.paths))
-            chunk_text = contents.get(chunk_id, "")
+            hydrated = chunks.get(chunk_id, {})
+            chunk_text = hydrated.get("content", "")
             content = f"{path_text}\n\n{chunk_text}".strip() if chunk_text else path_text
             results.append(
                 RetrievalResult(
@@ -131,6 +179,10 @@ class Neo4jGraphRetriever(BaseRetriever):
                     score=float(len(info.paths)),
                     source_type="graph",
                     metadata={
+                        # title/url come from Chroma so pure-graph citations are
+                        # still resolvable to a human-readable source, not just paths.
+                        "title": hydrated.get("metadata", {}).get("title"),
+                        "url": hydrated.get("metadata", {}).get("url"),
                         "matched_entities": sorted(info.entity_names),
                         "graph_paths": sorted(info.paths),
                     },

@@ -123,6 +123,30 @@ def test_service_and_severity_extracted_as_case_insensitive_term_filters():
     assert {"term": {"severity": {"value": "High", "case_insensitive": True}}} in filters
 
 
+def test_explicit_filters_override_llm_extracted_service_and_severity():
+    payload = {"service": "auth-service", "severity": "low", "error_code": None, "date_range": None}
+    es = _FakeElasticsearch([make_hit()])
+    retriever = ElasticsearchKeywordRetriever(es, anthropic_client=_filters_client(payload))
+
+    retriever.retrieve(
+        "payment service errors", filters={"service": "payment-service", "severity": "critical"}
+    )
+
+    filters = es.search_calls[0]["query"]["bool"]["filter"]
+    assert {"term": {"service": {"value": "payment-service", "case_insensitive": True}}} in filters
+    assert {"term": {"severity": {"value": "critical", "case_insensitive": True}}} in filters
+
+
+def test_explicit_filters_fill_in_when_llm_extracted_nothing():
+    es = _FakeElasticsearch([make_hit()])
+    retriever = ElasticsearchKeywordRetriever(es, anthropic_client=_filters_client(NO_FILTERS_PAYLOAD))
+
+    retriever.retrieve("errors", filters={"service": "payment-service"})
+
+    filters = es.search_calls[0]["query"]["bool"]["filter"]
+    assert {"term": {"service": {"value": "payment-service", "case_insensitive": True}}} in filters
+
+
 def test_error_code_extracted_as_phrase_filter_against_content():
     payload = {"service": None, "severity": None, "error_code": "ERR-503", "date_range": None}
     es = _FakeElasticsearch([make_hit()])

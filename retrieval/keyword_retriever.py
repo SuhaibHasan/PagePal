@@ -67,11 +67,21 @@ class ElasticsearchKeywordRetriever(BaseRetriever):
         self._llm = anthropic_client or anthropic.Anthropic()
         self._model = model
 
-    def retrieve(self, query: str, top_k: int = 10) -> list[RetrievalResult]:
-        filters = self._extract_filters(query)
+    def retrieve(
+        self, query: str, top_k: int = 10, filters: dict[str, str] | None = None
+    ) -> list[RetrievalResult]:
+        extracted_filters = self._extract_filters(query)
+        # Explicit filters from the caller (e.g. a UI dropdown) are more reliable
+        # than the LLM's guess, so they win when both are present.
+        if filters:
+            if filters.get("service"):
+                extracted_filters.service = filters["service"]
+            if filters.get("severity"):
+                extracted_filters.severity = filters["severity"]
+
         response = self._client.search(
             index=self._index_name,
-            query=self._build_query(query, filters),
+            query=self._build_query(query, extracted_filters),
             size=top_k,
         )
         hits = response["hits"]["hits"]

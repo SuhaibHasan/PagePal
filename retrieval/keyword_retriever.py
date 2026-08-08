@@ -71,13 +71,17 @@ class ElasticsearchKeywordRetriever(BaseRetriever):
         self, query: str, top_k: int = 10, filters: dict[str, str] | None = None
     ) -> list[RetrievalResult]:
         extracted_filters = self._extract_filters(query)
-        # Explicit filters from the caller (e.g. a UI dropdown) are more reliable
+        # Explicit filters from the caller (e.g. a UI sidebar) are more reliable
         # than the LLM's guess, so they win when both are present.
         if filters:
             if filters.get("service"):
                 extracted_filters.service = filters["service"]
             if filters.get("severity"):
                 extracted_filters.severity = filters["severity"]
+            if filters.get("date_from") or filters.get("date_to"):
+                extracted_filters.date_range = DateRange(
+                    start=filters.get("date_from"), end=filters.get("date_to")
+                )
 
         response = self._client.search(
             index=self._index_name,

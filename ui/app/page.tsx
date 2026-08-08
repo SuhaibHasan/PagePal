@@ -1,100 +1,100 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { ChatPanel } from "@/app/components/ChatPanel";
+import { GraphExplorer } from "@/app/components/GraphExplorer";
+import { Sidebar } from "@/app/components/Sidebar";
+import { extractEntityNames } from "@/app/lib/graphPath";
+import { streamChat } from "@/app/lib/api";
+import type { ChatMessage, Filters } from "@/app/lib/types";
 
-type Citation = {
-  title: string | null;
-  url: string | null;
-  retrieval_path: string;
-  graph_path: string | null;
-};
+export default function HomePage() {
+  const [filters, setFilters] = useState<Filters>({});
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [exploredEntity, setExploredEntity] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
-type Message = {
-  role: "user" | "assistant";
-  content: string;
-  citations?: Citation[];
-};
+  const suggestedEntities = useMemo(() => {
+    const names = new Set<string>();
+    for (const message of messages) {
+      for (const citation of message.citations ?? []) {
+        if (citation.graph_path) {
+          for (const name of extractEntityNames(citation.graph_path)) {
+            names.add(name);
+          }
+        }
+      }
+    }
+    return Array.from(names);
+  }, [messages]);
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+  function updateAssistantMessage(id: string, update: Partial<ChatMessage>) {
+    setMessages((prev) =>
+      prev.map((message) => (message.id === id ? { ...message, ...update } : message)),
+    );
+  }
 
-export default function ChatPage() {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
-    const message = input.trim();
-    if (!message || isLoading) return;
-
-    setMessages((prev) => [...prev, { role: "user", content: message }]);
-    setInput("");
-    setIsLoading(true);
+  async function handleSend(text: string) {
+    const assistantId = crypto.randomUUID();
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role: "user", content: text },
+      { id: assistantId, role: "assistant", content: "", isStreaming: true },
+    ]);
+    setIsStreaming(true);
 
     try {
-      const response = await fetch(`${API_URL}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+      await streamChat(text, sessionIdRef.current, filters, {
+        onSession: (sessionId) => {
+          sessionIdRef.current = sessionId;
+        },
+        onToken: (chunk) => {
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantId
+                ? { ...message, content: message.content + chunk }
+                : message,
+            ),
+          );
+        },
+        onCitations: (citations) => updateAssistantMessage(assistantId, { citations }),
+        onDone: () => updateAssistantMessage(assistantId, { isStreaming: false }),
+        onError: (error) => updateAssistantMessage(assistantId, { isStreaming: false, error }),
       });
-      if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}`);
-      }
-      const data = await response.json();
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: data.answer, citations: data.citations },
-      ]);
     } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `Error: ${(error as Error).message}` },
-      ]);
+      updateAssistantMessage(assistantId, { isStreaming: false, error: (error as Error).message });
     } finally {
-      setIsLoading(false);
+      setIsStreaming(false);
     }
   }
 
   return (
-    <main className="chat">
-      <h1>ProdSupportBuddy</h1>
-      <div className="messages">
-        {messages.map((message, index) => (
-          <div key={index} className={`message ${message.role}`}>
-            <p>{message.content}</p>
-            {message.citations && message.citations.length > 0 && (
-              <ul className="sources">
-                {message.citations.map((citation, citationIndex) => (
-                  <li key={citationIndex}>
-                    [{citation.retrieval_path}]{" "}
-                    {citation.url ? (
-                      <a href={citation.url} target="_blank" rel="noreferrer">
-                        {citation.title ?? citation.url}
-                      </a>
-                    ) : (
-                      (citation.title ?? "Untitled source")
-                    )}
-                    {citation.graph_path && (
-                      <div className="graph-path">{citation.graph_path}</div>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ))}
-        {isLoading && <div className="message assistant">Thinking…</div>}
-      </div>
-      <form onSubmit={handleSubmit} className="composer">
-        <input
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="Describe the production issue…"
+    <main className="flex h-screen overflow-hidden bg-slate-950 text-slate-100">
+      <Sidebar filters={filters} onChange={setFilters} />
+
+      <section className="flex min-w-0 flex-1 flex-col border-r border-slate-800">
+        <header className="border-b border-slate-800 px-4 py-3">
+          <h1 className="text-lg font-semibold">ProdSupportBuddy</h1>
+          <p className="text-xs text-slate-500">Hybrid RAG assistant for production incidents</p>
+        </header>
+        <div className="min-h-0 flex-1">
+          <ChatPanel
+            messages={messages}
+            isStreaming={isStreaming}
+            onSend={handleSend}
+            onExploreEntity={setExploredEntity}
+          />
+        </div>
+      </section>
+
+      <section className="w-[420px] shrink-0 p-3">
+        <GraphExplorer
+          entityName={exploredEntity}
+          onSearch={setExploredEntity}
+          suggestedEntities={suggestedEntities}
         />
-        <button type="submit" disabled={isLoading}>
-          Send
-        </button>
-      </form>
+      </section>
     </main>
   );
 }

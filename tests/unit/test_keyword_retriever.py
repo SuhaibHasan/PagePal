@@ -147,6 +147,34 @@ def test_explicit_filters_fill_in_when_llm_extracted_nothing():
     assert {"term": {"service": {"value": "payment-service", "case_insensitive": True}}} in filters
 
 
+def test_explicit_date_range_filter_overrides_llm_extracted_range():
+    payload = {
+        "service": None,
+        "severity": None,
+        "error_code": None,
+        "date_range": {"start": "2023-01-01", "end": "2023-01-31"},
+    }
+    es = _FakeElasticsearch([make_hit()])
+    retriever = ElasticsearchKeywordRetriever(es, anthropic_client=_filters_client(payload))
+
+    retriever.retrieve(
+        "errors", filters={"date_from": "2024-06-01", "date_to": "2024-06-30"}
+    )
+
+    filters = es.search_calls[0]["query"]["bool"]["filter"]
+    assert {"range": {"incident_date": {"gte": "2024-06-01", "lte": "2024-06-30"}}} in filters
+
+
+def test_explicit_partial_date_range_filter_sets_only_the_provided_bound():
+    es = _FakeElasticsearch([make_hit()])
+    retriever = ElasticsearchKeywordRetriever(es, anthropic_client=_filters_client(NO_FILTERS_PAYLOAD))
+
+    retriever.retrieve("errors", filters={"date_from": "2024-06-01"})
+
+    filters = es.search_calls[0]["query"]["bool"]["filter"]
+    assert {"range": {"incident_date": {"gte": "2024-06-01"}}} in filters
+
+
 def test_error_code_extracted_as_phrase_filter_against_content():
     payload = {"service": None, "severity": None, "error_code": "ERR-503", "date_range": None}
     es = _FakeElasticsearch([make_hit()])

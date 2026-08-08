@@ -32,6 +32,12 @@ dev = [
     "mypy>=1.13.0",
     "testcontainers[neo4j]>=4.8.0",
 ]
+eval = [
+    "ragas==0.3.9",
+    "langchain-anthropic>=0.3.0",
+    "datasets>=2.20.0",
+    "langchain-community<0.4",
+]
 
 [build-system]
 requires = ["hatchling"]

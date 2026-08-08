@@ -250,6 +250,37 @@ Next.js 14 (App Router) + Tailwind, dark theme only, in three panels:
 
 ```bash
 uv run pytest tests/unit             # fast, no external services
+uv run pytest tests/eval             # fast, no external services (includes ragas_eval's own tests)
 uv run pytest tests/integration      # spins up a real Neo4j via testcontainers (needs Docker)
 RUN_INTEGRATION_TESTS=1 uv run pytest tests/eval  # requires docker compose services + ANTHROPIC_API_KEY
 ```
+
+### RAGAS retrieval-quality evaluation
+
+`tests/eval/ragas_eval.py` scores the full RAG pipeline with RAGAS across a 20-question golden dataset (`tests/eval/golden_dataset.py`) — 7 semantic (paraphrased,
+no exact identifiers), 7 exact-match (error codes, incident/service names), and 6 relationship
+(multi-hop ownership/dependency/causal) questions — against a fictional but internally consistent
+incident/runbook corpus (`tests/eval/fixtures/runbooks/`).
+
+```bash
+uv sync --group eval
+uv run python -m ingestion --local-dir tests/eval/fixtures/runbooks
+uv run python tests/eval/ragas_eval.py [--limit N] [--output report.md]
+```
+
+It runs every question through four retrieval configurations — vector-only, keyword-only,
+graph-only, and the full hybrid pipeline (reranked) — generating a real answer for each via
+`AnswerGenerator`, then scores every (question, retrieved context, answer, ground truth) tuple
+with RAGAS's `faithfulness`, `answer_relevancy`, `context_precision`, and `context_recall`,
+judged by Claude through `langchain_anthropic.ChatAnthropic` wrapped in
+`ragas.llms.LangchainLLMWrapper` (embeddings for `answer_relevancy` use the same
+`all-MiniLM-L6-v2` model the app embeds with, via `langchain_community`'s `HuggingFaceEmbeddings`).
+Output is a markdown report: an overall comparison table plus a per-category breakdown, so you
+can see e.g. whether graph-only actually wins on relationship questions.
+
+This makes real Claude API calls for every generated answer *and* every metric judgment (4
+metrics × 20 questions × 4 configs), so a full run takes several minutes and real API cost — it's
+a deliberate, manually-triggered report, not something that runs in CI on every commit. The
+`ragas`/`langchain-anthropic`/`datasets` dependencies live in a separate `eval` uv group for the
+same reason; `uv sync` alone won't install them, and `tests/eval/test_ragas_eval.py` (fast, no
+network) skips itself if they're absent.

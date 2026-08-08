@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 class ChatFilters(BaseModel):
     service: str | None = None
     severity: str | None = None
+    date_from: str | None = None  # YYYY-MM-DD
+    date_to: str | None = None  # YYYY-MM-DD
 
 
 class ChatRequest(BaseModel):

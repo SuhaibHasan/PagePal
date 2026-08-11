@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import redis
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
@@ -32,6 +34,7 @@ from ingestion.pipeline import IngestionPipeline
 from retrieval.graph_retriever import Neo4jGraphRetriever
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
 from retrieval.vector_retriever import ChromaVectorRetriever
+from wiki.db import create_wiki_index
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +98,13 @@ def _format_sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-app = FastAPI(title="ProdSupportBuddy API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await create_wiki_index()
+    yield
+
+
+app = FastAPI(title="ProdSupportBuddy API", version="0.1.0", lifespan=lifespan)
 
 _settings = get_settings()
 app.add_middleware(

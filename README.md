@@ -49,8 +49,8 @@ uv run uvicorn api.main:app --reload --port 8080
 
 ### Endpoints
 
-**`POST /chat`** — `{ session_id?, message, filters?: { service?, severity? } }`, streamed back as
-Server-Sent Events:
+**`POST /chat`** — `{ session_id?, message, filters?: { service?, severity?, date_from?, date_to? } }`,
+streamed back as Server-Sent Events:
 
 ```
 event: session
@@ -70,12 +70,11 @@ data: {}
 ```
 
 A missing `session_id` is generated server-side and echoed back in the first event so the
-client can persist it for follow-up turns. `filters.service`/`filters.severity` are passed to
-the keyword retriever and take precedence over whatever it infers from the query text itself
-(see Retrieval below). Conversation history is stored in Redis per `session_id` with a 1-hour
-TTL, and the last 5 turns are included in every prompt for follow-up context. Each session is
-rate-limited to 10 requests/minute via a Redis sorted-set sliding window; requests beyond that
-get `429`.
+client can persist it for follow-up turns. `filters.*` are passed to the keyword retriever and
+take precedence over whatever it infers from the query text itself (see Retrieval below).
+Conversation history is stored in Redis per `session_id` with a 1-hour TTL, and the last 5
+turns are included in every prompt for follow-up context. Each session is rate-limited to 10
+requests/minute via a Redis sorted-set sliding window; requests beyond that get `429`.
 
 **`POST /ingest`** — `{ source_type: "local"|"confluence"|"pagerduty"|"jira", path?, space_key?, jql? }`
 kicks off ingestion + graph building for one source as a FastAPI background task and returns
@@ -228,10 +227,60 @@ npm install
 npm run dev
 ```
 
+Next.js 14 (App Router) + Tailwind, dark theme only, in three panels:
+
+- **Chat** (`app/components/ChatPanel.tsx`) — streams `POST /chat`'s SSE response token-by-token
+  (`app/lib/sse.ts` parses `text/event-stream` off a `fetch` body, since native `EventSource`
+  doesn't support POST). Each assistant message renders its citations as cards
+  (`CitationCard.tsx`) tagged with a retrieval-path badge — **Vector** / **Keyword** / **Graph**
+  / **Hybrid** when a chunk was found by more than one retriever (`lib/retrievalPath.ts` maps
+  the API's `"keyword+vector"`-style tags to one of the four). A citation's `graph_path` also
+  renders as clickable entity chips (parsed out of the arrow-chain string by
+  `lib/graphPath.ts`) that open that entity in the graph explorer.
+- **Graph Explorer** (`GraphExplorer.tsx`) — a hand-rolled D3 force-directed graph (drag, zoom/pan)
+  over `GET /graph/explore`'s nodes/edges, colored by label: `SERVICE` blue, `INCIDENT` red,
+  `RUNBOOK` green, `TEAM` yellow (plus a few extra colors for `ERROR_CODE`/`DEPENDENCY`/`CONFIG`
+  and a gray fallback). Driven either by typing an entity name or clicking a suggestion chip
+  surfaced from any citation in the conversation so far.
+- **Filter sidebar** (`Sidebar.tsx`) — service, severity (P1–P4), and a date range, sent as
+  `POST /chat`'s `filters` and merged into the keyword retriever's query server-side (explicit
+  values win over whatever it infers from the question itself).
+
 ## Tests
 
 ```bash
 uv run pytest tests/unit             # fast, no external services
+uv run pytest tests/eval             # fast, no external services (includes ragas_eval's own tests)
 uv run pytest tests/integration      # spins up a real Neo4j via testcontainers (needs Docker)
 RUN_INTEGRATION_TESTS=1 uv run pytest tests/eval  # requires docker compose services + ANTHROPIC_API_KEY
 ```
+
+### RAGAS retrieval-quality evaluation
+
+`tests/eval/ragas_eval.py` scores the full RAG pipeline with RAGAS across a 20-question golden dataset (`tests/eval/golden_dataset.py`) — 7 semantic (paraphrased,
+no exact identifiers), 7 exact-match (error codes, incident/service names), and 6 relationship
+(multi-hop ownership/dependency/causal) questions — against a fictional but internally consistent
+incident/runbook corpus (`tests/eval/fixtures/runbooks/`).
+
+```bash
+uv sync --group eval
+uv run python -m ingestion --local-dir tests/eval/fixtures/runbooks
+uv run python tests/eval/ragas_eval.py [--limit N] [--output report.md]
+```
+
+It runs every question through four retrieval configurations — vector-only, keyword-only,
+graph-only, and the full hybrid pipeline (reranked) — generating a real answer for each via
+`AnswerGenerator`, then scores every (question, retrieved context, answer, ground truth) tuple
+with RAGAS's `faithfulness`, `answer_relevancy`, `context_precision`, and `context_recall`,
+judged by Claude through `langchain_anthropic.ChatAnthropic` wrapped in
+`ragas.llms.LangchainLLMWrapper` (embeddings for `answer_relevancy` use the same
+`all-MiniLM-L6-v2` model the app embeds with, via `langchain_community`'s `HuggingFaceEmbeddings`).
+Output is a markdown report: an overall comparison table plus a per-category breakdown, so you
+can see e.g. whether graph-only actually wins on relationship questions.
+
+This makes real Claude API calls for every generated answer *and* every metric judgment (4
+metrics × 20 questions × 4 configs), so a full run takes several minutes and real API cost — it's
+a deliberate, manually-triggered report, not something that runs in CI on every commit. The
+`ragas`/`langchain-anthropic`/`datasets` dependencies live in a separate `eval` uv group for the
+same reason; `uv sync` alone won't install them, and `tests/eval/test_ragas_eval.py` (fast, no
+network) skips itself if they're absent.

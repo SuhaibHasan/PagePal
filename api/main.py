@@ -90,6 +90,8 @@ async def _run_ingestion(pipeline: IngestionPipeline, loader: BaseLoader) -> Non
         logger.info(
             "Ingestion complete: %d chunks from %d documents", stats.chunks, stats.documents
         )
+        if stats.chunks:
+            logger.info("Wiki distillation tasks queued as part of ingestion")
     except Exception:
         logger.exception("Background ingestion failed")
 

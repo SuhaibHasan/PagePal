@@ -1,9 +1,26 @@
 import json
 
+import pytest
+
+import api.rag as rag_module
 from api.config import Settings
 from api.rag import RagPipeline
 from retrieval.answer_generator import Citation
 from retrieval.models import RetrievalResult
+
+
+@pytest.fixture(autouse=True)
+def _no_wiki_entry(monkeypatch):
+    # These tests exercise the RAG fallback path specifically; the wiki fast path
+    # and its background feedback loop are covered separately in tests/api/test_chat_wiki.py.
+    async def fake_wiki_retrieve(query):
+        return None
+
+    async def fake_wiki_upsert(query, answer, citations):
+        pass
+
+    monkeypatch.setattr(rag_module, "wiki_retrieve", fake_wiki_retrieve)
+    monkeypatch.setattr(rag_module, "wiki_upsert_from_rag", fake_wiki_upsert)
 
 
 class _FakeRetriever:

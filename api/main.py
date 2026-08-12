@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import redis
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -35,8 +36,11 @@ from retrieval.graph_retriever import Neo4jGraphRetriever
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
 from retrieval.vector_retriever import ChromaVectorRetriever
 from wiki.db import create_wiki_index
+from wiki.invalidator import invalidate_stale
 
 logger = logging.getLogger(__name__)
+
+WIKI_INVALIDATION_INTERVAL_HOURS = 6
 
 configure_tracing()
 
@@ -103,7 +107,15 @@ def _format_sse(event: str, data: dict) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await create_wiki_index()
-    yield
+
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(invalidate_stale, "interval", hours=WIKI_INVALIDATION_INTERVAL_HOURS)
+    scheduler.start()
+
+    try:
+        yield
+    finally:
+        scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="ProdSupportBuddy API", version="0.1.0", lifespan=lifespan)

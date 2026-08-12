@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import anthropic
@@ -103,6 +104,8 @@ async def test_distill_produces_a_wiki_entry_from_a_valid_response(monkeypatch, 
     assert entry.hit_count == 0
     assert entry.ttl_days == 30
     assert entry.confidence == 0.9  # incident + resolved
+    expected_hash = hashlib.sha256(distiller.concatenate_and_trim([chunk]).encode()).hexdigest()
+    assert entry.source_content_hash == expected_hash
 
     # upsert_wiki_entry was called with the same entry that was returned
     assert _capture_upserts == [entry]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -40,9 +41,11 @@ _CONFIDENCE_BY_SOURCE_AND_STATUS = {
 }
 
 
-def _concatenate_and_trim(chunks: list[dict]) -> str:
+def concatenate_and_trim(chunks: list[dict]) -> str:
     # Trimming only shortens what's sent to the model - it never touches the chunk
     # dicts themselves, so metadata used later (source_refs, confidence) stays intact.
+    # Public: wiki/invalidator.py reuses this so its staleness hash is computed over
+    # the exact same (trimmed) text a WikiEntry's source_content_hash was built from.
     content = "\n\n".join(chunk["content"] for chunk in chunks)
     encoding = tiktoken.get_encoding(ENCODING_NAME)
     tokens = encoding.encode(content)
@@ -64,7 +67,7 @@ async def distill(chunks: list[dict]) -> WikiEntry | None:
     if not chunks:
         return None
 
-    content = _concatenate_and_trim(chunks)
+    content = concatenate_and_trim(chunks)
     client = get_async_anthropic_client()
 
     try:
@@ -95,12 +98,14 @@ async def distill(chunks: list[dict]) -> WikiEntry | None:
 
     now = datetime.now(UTC)
     source_refs = list(dict.fromkeys(chunk["doc_id"] for chunk in chunks))
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
 
     try:
         entry = WikiEntry(
             **data,
             confidence=_confidence_for(chunks),
             source_refs=source_refs,
+            source_content_hash=content_hash,
             created_at=now,
             last_updated=now,
             last_validated=now,

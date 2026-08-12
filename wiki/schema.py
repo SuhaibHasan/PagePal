@@ -25,6 +25,11 @@ class WikiEntry(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     hit_count: int = 0
     source_refs: list[str] = Field(default_factory=list)
+    # SHA256 of the concatenated source chunk content this entry was distilled
+    # from - lets wiki/invalidator.py tell an unchanged source apart from an
+    # updated one without redistilling on every staleness sweep. None for
+    # entries predating this field.
+    source_content_hash: str | None = None
     created_at: datetime
     last_updated: datetime
     last_validated: datetime

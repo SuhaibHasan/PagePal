@@ -67,3 +67,4 @@ def test_optional_fields_default_correctly_when_omitted():
     assert entry.source_refs == []
     assert entry.hit_count == 0
     assert entry.ttl_days == 30
+    assert entry.source_content_hash is None

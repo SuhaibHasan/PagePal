@@ -195,6 +195,19 @@ async def test_invalidate_stale_returns_zero_counts_when_nothing_is_stale(monkey
     assert counts == {"refreshed": 0, "redistilled": 0, "soft_deleted": 0}
 
 
+async def test_invalidate_stale_returns_zero_counts_when_es_is_unreachable(monkeypatch):
+    class _FailingEsClient:
+        def search(self, index, query, size):
+            raise ConnectionError("elasticsearch unreachable")
+
+    monkeypatch.setattr(invalidator, "get_elasticsearch_client", lambda: _FailingEsClient())
+    monkeypatch.setattr(invalidator, "_get_collection", lambda: _FakeCollection({}))
+
+    counts = await invalidator.invalidate_stale()  # must not raise
+
+    assert counts == {"refreshed": 0, "redistilled": 0, "soft_deleted": 0}
+
+
 async def test_invalidate_for_doc_triggers_the_distiller_when_entries_reference_it(
     monkeypatch, distill_calls
 ):

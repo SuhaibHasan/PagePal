@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from sentence_transformers import CrossEncoder
 
 from retrieval.models import RetrievalResult
+
+
+class Reranker(Protocol):
+    def rerank(
+        self, query: str, result_lists: list[list[RetrievalResult]], top_k: int = 8
+    ) -> list[RetrievalResult]: ...
 
 CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -76,3 +83,26 @@ class CrossEncoderReranker:
                     existing.content = result.content
 
         return list(candidates.values())
+
+
+class PassthroughReranker:
+    """Used when the cross-encoder can't be loaded (e.g. no network access to
+    HuggingFace Hub). Dedupes the same way CrossEncoderReranker does, but keeps
+    each candidate's first-seen retrieval order instead of a learned score -
+    degraded ranking quality beats no answer at all."""
+
+    def rerank(
+        self, query: str, result_lists: list[list[RetrievalResult]], top_k: int = 8
+    ) -> list[RetrievalResult]:
+        candidates = CrossEncoderReranker._deduplicate(result_lists)
+        return [
+            RetrievalResult(
+                chunk_id=candidate.chunk_id,
+                document_id=candidate.document_id,
+                content=candidate.content,
+                score=0.0,
+                source_type="+".join(sorted(candidate.source_types)),
+                metadata=candidate.metadata,
+            )
+            for candidate in candidates[:top_k]
+        ]

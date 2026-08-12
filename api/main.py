@@ -42,9 +42,9 @@ from ingestion.loaders.file_loader import FileLoader
 from ingestion.loaders.jira_loader import JiraLoader
 from ingestion.loaders.pagerduty_loader import PagerDutyLoader
 from ingestion.pipeline import IngestionPipeline
+from retrieval.base import BaseRetriever
 from retrieval.graph_retriever import Neo4jGraphRetriever
-from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
-from retrieval.vector_retriever import ChromaVectorRetriever
+from retrieval.reranker import PassthroughReranker, Reranker
 from wiki.db import (
     create_wiki_index,
     get_wiki_entry,
@@ -66,13 +66,39 @@ configure_tracing()
 
 
 def get_rag_pipeline(settings: Settings = Depends(get_settings)) -> RagPipeline:
+    # Each retriever/the reranker is constructed independently and failures are
+    # isolated - e.g. Chroma being down (which get_vector_retriever AND
+    # get_graph_retriever depend on, the latter to hydrate chunk content) should
+    # degrade to answering from whichever sources are still reachable, not fail
+    # the whole /chat request before retrieval even starts.
+    retrievers: dict[str, BaseRetriever] = {}
+    for name, factory in (
+        ("vector", get_vector_retriever),
+        ("keyword", get_keyword_retriever),
+        ("graph", get_graph_retriever),
+    ):
+        try:
+            retrievers[name] = factory()
+        except Exception:
+            logger.warning(
+                "Could not construct the %s retriever; continuing without it",
+                name,
+                exc_info=True,
+            )
+
+    reranker: Reranker
+    try:
+        reranker = get_reranker()
+    except Exception:
+        logger.warning(
+            "Could not load the cross-encoder reranker; falling back to unranked results",
+            exc_info=True,
+        )
+        reranker = PassthroughReranker()
+
     return RagPipeline(
-        retrievers={
-            "vector": get_vector_retriever(),
-            "keyword": get_keyword_retriever(),
-            "graph": get_graph_retriever(),
-        },
-        reranker=get_reranker(),
+        retrievers=retrievers,
+        reranker=reranker,
         answer_generator=get_answer_generator(),
         redis_client=get_redis_client(),
         settings=settings,
@@ -126,7 +152,18 @@ def _format_sse(event: str, data: dict) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    await create_wiki_index()
+    try:
+        await create_wiki_index()
+    except Exception:
+        # Elasticsearch not being up yet (or at all) shouldn't stop the whole API
+        # from starting - /health already reports this as degraded, and the wiki
+        # layer's own call sites (wiki_retrieve, upsert_from_rag, ...) each
+        # degrade independently too.
+        logger.warning(
+            "Could not create/verify the wiki_entries index at startup; "
+            "wiki features will be degraded until Elasticsearch is reachable",
+            exc_info=True,
+        )
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(invalidate_stale, "interval", hours=WIKI_INVALIDATION_INTERVAL_HOURS)
@@ -153,23 +190,23 @@ app.add_middleware(
 
 
 @app.get("/health", response_model=HealthStatus)
-async def health(
-    request: Request,
-    redis_client: redis.Redis = Depends(get_redis_client),
-    vector_retriever: ChromaVectorRetriever = Depends(get_vector_retriever),
-    keyword_retriever: ElasticsearchKeywordRetriever = Depends(get_keyword_retriever),
-    graph_retriever: Neo4jGraphRetriever = Depends(get_graph_retriever),
-) -> HealthStatus:
+async def health(request: Request) -> HealthStatus:
+    # Deliberately not Depends(get_vector_retriever) etc.: constructing a retriever
+    # (e.g. ChromaVectorRetriever, whose client eagerly connects) can itself raise,
+    # and a Depends() failure happens during FastAPI's dependency resolution, before
+    # this handler's own try/except ever runs - a dependency being down would 500
+    # the whole health check instead of being reported as "degraded".
     services: dict[str, str] = {}
 
-    for name, check in (
-        ("redis", redis_client.ping),
-        ("chromadb", vector_retriever.ping),
-        ("elasticsearch", keyword_retriever.ping),
-        ("neo4j", graph_retriever.ping),
+    for name, factory, method in (
+        ("redis", get_redis_client, "ping"),
+        ("chromadb", get_vector_retriever, "ping"),
+        ("elasticsearch", get_keyword_retriever, "ping"),
+        ("neo4j", get_graph_retriever, "ping"),
     ):
         try:
-            await asyncio.to_thread(check)
+            instance = factory()
+            await asyncio.to_thread(getattr(instance, method))
             services[name] = "ok"
         except Exception as exc:  # noqa: BLE001
             services[name] = f"error: {exc}"

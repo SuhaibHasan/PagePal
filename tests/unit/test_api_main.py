@@ -3,14 +3,14 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from api.config import get_settings
 from api.dependencies import (
     get_graph_retriever,
     get_ingestion_pipeline,
-    get_keyword_retriever,
     get_redis_client,
-    get_vector_retriever,
 )
 from api.main import WIKI_INVALIDATION_INTERVAL_HOURS, app, get_rag_pipeline
+from retrieval.reranker import PassthroughReranker
 from wiki.invalidator import invalidate_stale
 
 
@@ -153,11 +153,17 @@ def test_chat_rejects_the_11th_request_within_a_minute(client):
     assert response.status_code == 429
 
 
+def _mock_health_factories(monkeypatch, **overrides):
+    # health() calls the get_* factories directly (not via Depends()) so that a
+    # construction failure - not just a failed .ping() - is also caught. That means
+    # app.dependency_overrides no longer reaches it; tests patch api.main's names
+    # directly instead. Defaults to a healthy factory for anything not overridden.
+    for name in ("get_redis_client", "get_vector_retriever", "get_keyword_retriever", "get_graph_retriever"):
+        monkeypatch.setattr(f"api.main.{name}", overrides.get(name, lambda: _OkPingable()))
+
+
 def test_health_reports_ok_when_every_service_responds(client, monkeypatch):
-    app.dependency_overrides[get_redis_client] = lambda: _OkPingable()
-    app.dependency_overrides[get_vector_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_keyword_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_graph_retriever] = lambda: _OkPingable()
+    _mock_health_factories(monkeypatch)
 
     async def fake_index_exists():
         return True
@@ -180,24 +186,39 @@ def test_health_reports_ok_when_every_service_responds(client, monkeypatch):
     }
 
 
-def test_health_reports_degraded_when_one_service_fails(client):
-    app.dependency_overrides[get_redis_client] = lambda: _OkPingable()
-    app.dependency_overrides[get_vector_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_keyword_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_graph_retriever] = lambda: _FailingPingable()
+def test_health_reports_degraded_when_one_service_fails(client, monkeypatch):
+    _mock_health_factories(monkeypatch, get_graph_retriever=lambda: _FailingPingable())
 
     response = client.get("/health")
 
+    assert response.status_code == 200
     body = response.json()
     assert body["status"] == "degraded"
     assert "error" in body["services"]["neo4j"]
 
 
+def test_health_reports_degraded_instead_of_500_when_a_dependency_cannot_even_be_constructed(
+    client, monkeypatch
+):
+    # Regression case: ChromaVectorRetriever's client eagerly connects, so
+    # get_vector_retriever() can raise before health() ever gets a chance to try
+    # a .ping() at all. Depends(get_vector_retriever) would 500 the whole
+    # request here; calling the factory inside health()'s own try/except must not.
+    def failing_factory():
+        raise ValueError("Could not connect to a Chroma server. Are you sure it is running?")
+
+    _mock_health_factories(monkeypatch, get_vector_retriever=failing_factory)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert "error" in body["services"]["chromadb"]
+
+
 def test_health_reports_wiki_index_missing_as_degraded(client, monkeypatch):
-    app.dependency_overrides[get_redis_client] = lambda: _OkPingable()
-    app.dependency_overrides[get_vector_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_keyword_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_graph_retriever] = lambda: _OkPingable()
+    _mock_health_factories(monkeypatch)
 
     async def fake_index_missing():
         return False
@@ -213,10 +234,7 @@ def test_health_reports_wiki_index_missing_as_degraded(client, monkeypatch):
 
 
 def test_health_reports_scheduler_not_running_as_degraded(client, monkeypatch):
-    app.dependency_overrides[get_redis_client] = lambda: _OkPingable()
-    app.dependency_overrides[get_vector_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_keyword_retriever] = lambda: _OkPingable()
-    app.dependency_overrides[get_graph_retriever] = lambda: _OkPingable()
+    _mock_health_factories(monkeypatch)
 
     async def fake_index_exists():
         return True
@@ -290,3 +308,51 @@ def test_lifespan_creates_wiki_index_and_starts_invalidation_scheduler(monkeypat
 
     # shutdown() runs when the context exits
     assert scheduler.running is False
+
+
+def test_lifespan_starts_up_even_if_the_wiki_index_cannot_be_created(monkeypatch):
+    # Elasticsearch not being reachable at boot must not prevent the whole API
+    # from starting - only the wiki layer degrades, checked separately by /health.
+    async def failing_create_wiki_index():
+        raise ConnectionError("elasticsearch unreachable")
+
+    monkeypatch.setattr("api.main.create_wiki_index", failing_create_wiki_index)
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/health")
+
+    assert response.status_code == 200
+
+
+def test_get_rag_pipeline_omits_a_retriever_that_fails_to_construct(monkeypatch):
+    def failing_vector_retriever():
+        raise ConnectionError("chromadb unreachable")
+
+    monkeypatch.setattr("api.main.get_vector_retriever", failing_vector_retriever)
+    monkeypatch.setattr("api.main.get_keyword_retriever", lambda: object())
+    monkeypatch.setattr("api.main.get_graph_retriever", lambda: object())
+    monkeypatch.setattr("api.main.get_reranker", lambda: object())
+    monkeypatch.setattr("api.main.get_answer_generator", lambda: object())
+    monkeypatch.setattr("api.main.get_redis_client", lambda: object())
+
+    pipeline = get_rag_pipeline(settings=get_settings())
+
+    assert "vector" not in pipeline._retrievers
+    assert "keyword" in pipeline._retrievers
+    assert "graph" in pipeline._retrievers
+
+
+def test_get_rag_pipeline_falls_back_to_passthrough_reranker(monkeypatch):
+    def failing_reranker():
+        raise OSError("could not download the cross-encoder model")
+
+    monkeypatch.setattr("api.main.get_vector_retriever", lambda: object())
+    monkeypatch.setattr("api.main.get_keyword_retriever", lambda: object())
+    monkeypatch.setattr("api.main.get_graph_retriever", lambda: object())
+    monkeypatch.setattr("api.main.get_reranker", failing_reranker)
+    monkeypatch.setattr("api.main.get_answer_generator", lambda: object())
+    monkeypatch.setattr("api.main.get_redis_client", lambda: object())
+
+    pipeline = get_rag_pipeline(settings=get_settings())
+
+    assert isinstance(pipeline._reranker, PassthroughReranker)

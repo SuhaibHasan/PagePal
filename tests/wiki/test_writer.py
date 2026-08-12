@@ -108,6 +108,7 @@ async def test_existing_entry_is_merged_and_confidence_bumped(monkeypatch, upser
         confidence=0.8,
         resolution_steps=["Restart pods"],
         affected_services=["payment-service"],
+        related_error_codes=["ERR-500"],
         tags=["payment-service"],
         source_refs=["Old Runbook"],
         created_at=old_time,
@@ -124,6 +125,7 @@ async def test_existing_entry_is_merged_and_confidence_bumped(monkeypatch, upser
     # Merged list fields: existing items first, new ones appended, no duplicates.
     assert entry.resolution_steps == ["Restart pods", "Raise the connection pool size"]
     assert entry.affected_services == ["payment-service", "postgres-primary"]
+    assert entry.related_error_codes == ["ERR-500", "ERR-503"]
     assert entry.tags == ["payment-service", "postgres"]
     assert entry.confidence == pytest.approx(0.85)
     assert entry.last_updated > old_time
@@ -132,6 +134,33 @@ async def test_existing_entry_is_merged_and_confidence_bumped(monkeypatch, upser
     assert entry.summary == "Original summary"
     assert entry.source_refs == ["Old Runbook"]
     assert entry.created_at == old_time
+
+
+async def test_related_error_codes_from_a_second_rag_answer_are_merged_and_deduplicated(
+    monkeypatch, upsert_calls
+):
+    # Simulates a second RAG answer distilling to a payload that repeats an
+    # error code the entry already has (ERR-503) alongside a genuinely new one.
+    second_answer_payload = {**VALID_PAYLOAD, "related_error_codes": ["ERR-503", "ERR-429"]}
+    client = make_client(json.dumps(second_answer_payload))
+    _use_client(monkeypatch, client)
+
+    existing = WikiEntry(
+        id="existing-id",
+        title="Original title",
+        summary="Original summary",
+        confidence=0.8,
+        related_error_codes=["ERR-503"],
+        created_at=datetime.now(UTC),
+        last_updated=datetime.now(UTC),
+        last_validated=datetime.now(UTC),
+    )
+    _use_existing_entry(monkeypatch, existing)
+
+    await writer.upsert_from_rag("why did payments fail again", "raise the pool size", [])
+
+    entry = upsert_calls[0]
+    assert entry.related_error_codes == ["ERR-503", "ERR-429"]
 
 
 async def test_confidence_bump_is_capped_at_0_95(monkeypatch, upsert_calls):

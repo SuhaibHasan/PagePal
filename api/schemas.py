@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from wiki.schema import WikiEntry
+
 
 class ChatFilters(BaseModel):
     service: str | None = None
@@ -50,3 +52,16 @@ class SubgraphResponse(BaseModel):
 class HealthStatus(BaseModel):
     status: str
     services: dict[str, Any] = Field(default_factory=dict)
+
+
+class WikiSearchHit(BaseModel):
+    entry: WikiEntry
+    score: float
+
+
+class WikiStats(BaseModel):
+    total_entries: int
+    avg_confidence: float
+    total_hits: int
+    stale_count: int
+    high_confidence_count: int

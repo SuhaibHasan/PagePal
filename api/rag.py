@@ -11,6 +11,9 @@ from api.telemetry import tracer
 from retrieval.answer_generator import AnswerGenerator, HistoryTurn
 from retrieval.base import BaseRetriever
 from retrieval.reranker import CrossEncoderReranker
+from wiki.retriever import retrieve as wiki_retrieve
+from wiki.schema import WikiEntry
+from wiki.writer import upsert_from_rag as wiki_upsert_from_rag
 
 SESSION_TTL_SECONDS = 3600
 MAX_HISTORY_TURNS = 5
@@ -30,6 +33,9 @@ class RagPipeline:
         self._answer_generator = answer_generator
         self._redis = redis_client
         self._settings = settings
+        # Holds references to fire-and-forget wiki-feedback tasks so they aren't
+        # garbage-collected before they run.
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def answer_stream(
         self, query: str, session_id: str, filters: dict[str, str] | None = None
@@ -41,6 +47,17 @@ class RagPipeline:
 
             history = await self._load_history(session_id)
 
+            # 1. Try the wiki first - a pre-validated, high-confidence entry skips
+            # the full retrieval + rerank + generation path entirely.
+            wiki_entry = await wiki_retrieve(query)
+            if wiki_entry is not None:
+                async for event, payload in self._answer_from_wiki(
+                    query, session_id, wiki_entry, history
+                ):
+                    yield event, payload
+                return
+
+            # 2. Existing RAG logic, unchanged.
             result_lists = await asyncio.gather(
                 *(
                     self._retrieve(name, retriever, query, filters)
@@ -68,8 +85,35 @@ class RagPipeline:
 
             await self._append_turn(session_id, query, answer_text)
 
-            yield "citations", {"citations": [citation.model_dump() for citation in citations]}
+            citation_dicts = [citation.model_dump() for citation in citations]
+
+            # 3. Feed the RAG answer back into the wiki, in the background.
+            self._queue_wiki_feedback(query, answer_text, citation_dicts)
+
+            yield "citations", {"citations": citation_dicts}
             yield "done", {}
+
+    async def _answer_from_wiki(
+        self, query: str, session_id: str, wiki_entry: WikiEntry, history: list[HistoryTurn]
+    ) -> AsyncIterator[tuple[str, dict]]:
+        answer_chunks: list[str] = []
+        with tracer.start_as_current_span("llm_call"):
+            async for chunk in self._answer_generator.from_wiki(query, wiki_entry, history=history):
+                answer_chunks.append(chunk)
+                yield "token", {"text": chunk}
+
+        answer_text = "".join(answer_chunks)
+        citations = self._answer_generator.build_wiki_citations(wiki_entry)
+
+        await self._append_turn(session_id, query, answer_text)
+
+        yield "citations", {"citations": [citation.model_dump() for citation in citations]}
+        yield "done", {}
+
+    def _queue_wiki_feedback(self, query: str, answer_text: str, citations: list[dict]) -> None:
+        task = asyncio.create_task(wiki_upsert_from_rag(query, answer_text, citations))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _retrieve(
         self, name: str, retriever: BaseRetriever, query: str, filters: dict[str, str] | None

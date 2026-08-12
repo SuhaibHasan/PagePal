@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -12,7 +15,16 @@ from ingestion.embedders.base import BaseEmbedder
 from ingestion.embedders.embedder import SentenceTransformerEmbedder
 from ingestion.graph_builder import GraphBuilder
 from ingestion.loaders.base import BaseLoader
-from ingestion.models import Chunk, Document
+from ingestion.models import Chunk, Document, SourceType
+
+logger = logging.getLogger(__name__)
+
+# PagerDuty/Jira chunks map directly to how wiki/distiller.py buckets confidence;
+# everything else (local files, Confluence) is treated as general runbook material.
+_DISTILLER_SOURCE_TYPE_BY_SOURCE_TYPE = {
+    SourceType.PAGERDUTY: "incident",
+    SourceType.JIRA: "jira",
+}
 
 ES_INDEX_MAPPING = {
     "properties": {
@@ -60,6 +72,9 @@ class IngestionPipeline:
         self._es_index = es_index
         self._graph_builder = graph_builder or GraphBuilder(neo4j_driver)
         self._ensure_es_index()
+        # Holds references to fire-and-forget distillation tasks so they aren't
+        # garbage-collected mid-run once _queue_wiki_distillation returns.
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def run(self, loaders: Sequence[BaseLoader]) -> IngestionStats:
         documents: list[Document] = []
@@ -76,8 +91,49 @@ class IngestionPipeline:
         embeddings = self._embedder.embed([chunk.content for chunk in chunks])
         self._index_vector_store(chunks, embeddings)
         self._index_keyword_store(chunks)
+        self._queue_wiki_distillation(chunks)
         await self._graph_builder.build(chunks)
         return IngestionStats(documents=len(documents), chunks=len(chunks))
+
+    def _queue_wiki_distillation(self, chunks: Sequence[Chunk]) -> None:
+        # Local import: wiki.distiller (and wiki.invalidator) import api.dependencies,
+        # which imports IngestionPipeline from this module - importing them at module
+        # level here would be a circular import.
+        from wiki.distiller import distill
+        from wiki.invalidator import invalidate_for_doc
+
+        chunks_by_doc_id: dict[str, list[Chunk]] = defaultdict(list)
+        for chunk in chunks:
+            chunks_by_doc_id[chunk.doc_id].append(chunk)
+
+        for doc_id, doc_chunks in chunks_by_doc_id.items():
+            distiller_chunks = [self._to_distiller_chunk(c) for c in doc_chunks]
+            self._track_background_task(distill(distiller_chunks))
+            logger.info(
+                "Wiki distillation queued for doc_id=%s, chunks=%d", doc_id, len(doc_chunks)
+            )
+            # Any other wiki entry that cites this doc_id as a source may now be
+            # stale too (the doc's content just changed), independent of the
+            # distillation of the doc's own entry queued above.
+            self._track_background_task(invalidate_for_doc(doc_id))
+
+    def _track_background_task(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    @staticmethod
+    def _to_distiller_chunk(chunk: Chunk) -> dict:
+        return {
+            "doc_id": chunk.doc_id,
+            "content": chunk.content,
+            "metadata": {
+                "source_type": _DISTILLER_SOURCE_TYPE_BY_SOURCE_TYPE.get(
+                    chunk.source_type, "runbook"
+                ),
+                "status": chunk.extra.get("status"),
+            },
+        }
 
     def _ensure_es_index(self) -> None:
         if not self._es_client.indices.exists(index=self._es_index):

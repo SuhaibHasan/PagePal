@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -8,7 +10,8 @@ from api.dependencies import (
     get_redis_client,
     get_vector_retriever,
 )
-from api.main import app, get_rag_pipeline
+from api.main import WIKI_INVALIDATION_INTERVAL_HOURS, app, get_rag_pipeline
+from wiki.invalidator import invalidate_stale
 
 
 class _FakeRedis:
@@ -67,10 +70,16 @@ class _FakeIngestionPipeline:
         return _Stats()
 
 
+class _FakeScheduler:
+    running = True
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
     app.dependency_overrides.clear()
+    if hasattr(app.state, "wiki_scheduler"):
+        del app.state.wiki_scheduler
 
 
 @pytest.fixture
@@ -144,11 +153,17 @@ def test_chat_rejects_the_11th_request_within_a_minute(client):
     assert response.status_code == 429
 
 
-def test_health_reports_ok_when_every_service_responds(client):
+def test_health_reports_ok_when_every_service_responds(client, monkeypatch):
     app.dependency_overrides[get_redis_client] = lambda: _OkPingable()
     app.dependency_overrides[get_vector_retriever] = lambda: _OkPingable()
     app.dependency_overrides[get_keyword_retriever] = lambda: _OkPingable()
     app.dependency_overrides[get_graph_retriever] = lambda: _OkPingable()
+
+    async def fake_index_exists():
+        return True
+
+    monkeypatch.setattr("api.main.wiki_index_exists", fake_index_exists)
+    app.state.wiki_scheduler = _FakeScheduler()
 
     response = client.get("/health")
 
@@ -160,6 +175,8 @@ def test_health_reports_ok_when_every_service_responds(client):
         "chromadb": "ok",
         "elasticsearch": "ok",
         "neo4j": "ok",
+        "wiki_index": "ok",
+        "wiki_scheduler": "ok",
     }
 
 
@@ -174,6 +191,44 @@ def test_health_reports_degraded_when_one_service_fails(client):
     body = response.json()
     assert body["status"] == "degraded"
     assert "error" in body["services"]["neo4j"]
+
+
+def test_health_reports_wiki_index_missing_as_degraded(client, monkeypatch):
+    app.dependency_overrides[get_redis_client] = lambda: _OkPingable()
+    app.dependency_overrides[get_vector_retriever] = lambda: _OkPingable()
+    app.dependency_overrides[get_keyword_retriever] = lambda: _OkPingable()
+    app.dependency_overrides[get_graph_retriever] = lambda: _OkPingable()
+
+    async def fake_index_missing():
+        return False
+
+    monkeypatch.setattr("api.main.wiki_index_exists", fake_index_missing)
+    app.state.wiki_scheduler = _FakeScheduler()
+
+    response = client.get("/health")
+
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert "error" in body["services"]["wiki_index"]
+
+
+def test_health_reports_scheduler_not_running_as_degraded(client, monkeypatch):
+    app.dependency_overrides[get_redis_client] = lambda: _OkPingable()
+    app.dependency_overrides[get_vector_retriever] = lambda: _OkPingable()
+    app.dependency_overrides[get_keyword_retriever] = lambda: _OkPingable()
+    app.dependency_overrides[get_graph_retriever] = lambda: _OkPingable()
+
+    async def fake_index_exists():
+        return True
+
+    monkeypatch.setattr("api.main.wiki_index_exists", fake_index_exists)
+    # No app.state.wiki_scheduler set - mirrors reality when lifespan hasn't run.
+
+    response = client.get("/health")
+
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert "error" in body["services"]["wiki_scheduler"]
 
 
 def test_ingest_schedules_a_background_task_and_returns_202(client):
@@ -212,3 +267,26 @@ def test_graph_explore_returns_nodes_and_edges(client):
     body = response.json()
     assert body["nodes"][0]["id"] == "auth-service"
     assert body["edges"] == []
+
+
+def test_lifespan_creates_wiki_index_and_starts_invalidation_scheduler(monkeypatch):
+    create_calls: list[bool] = []
+
+    async def fake_create_wiki_index():
+        create_calls.append(True)
+
+    monkeypatch.setattr("api.main.create_wiki_index", fake_create_wiki_index)
+
+    with TestClient(app):
+        assert create_calls == [True]
+
+        scheduler = app.state.wiki_scheduler
+        assert scheduler.running is True
+
+        jobs = scheduler.get_jobs()
+        assert len(jobs) == 1
+        assert jobs[0].func is invalidate_stale
+        assert jobs[0].trigger.interval == timedelta(hours=WIKI_INVALIDATION_INTERVAL_HOURS)
+
+    # shutdown() runs when the context exits
+    assert scheduler.running is False

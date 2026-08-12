@@ -124,6 +124,16 @@ async def test_returns_a_high_confidence_fresh_entry(monkeypatch, _capture_incre
     assert es_client.search_calls[0]["size"] == 1
 
 
+def test_normalize_score_caps_at_1_0_for_bm25_over_scoring():
+    # 15.0 / 10.0 = 1.5 uncapped - BM25 can score well above the boost sum on
+    # high-frequency terms, so this must clamp to 1.0 rather than exceed it.
+    assert retriever._normalize_score(15.0) == 1.0
+
+
+def test_normalize_score_below_the_cap_is_unaffected():
+    assert retriever._normalize_score(5.0) == 0.5
+
+
 async def test_stale_entry_returns_none(monkeypatch, _capture_increments):
     stale_time = datetime.now(UTC).replace(year=datetime.now(UTC).year - 1)
     hit = make_entry_hit(score=9.0, last_updated=stale_time, ttl_days=30)

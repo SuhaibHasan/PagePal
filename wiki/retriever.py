@@ -37,6 +37,12 @@ CONFIDENCE_FILTER_THRESHOLD = 0.5
 NORMALIZED_SCORE_THRESHOLD = 0.75
 
 
+def _normalize_score(raw_score: float) -> float:
+    # Capped at 1.0: BM25 can over-score a hit past MAX_POSSIBLE_SCORE on
+    # high-frequency terms, which would otherwise push "normalized" above 1.0.
+    return min(raw_score / MAX_POSSIBLE_SCORE, 1.0)
+
+
 class QuerySignals(BaseModel):
     services: list[str] = Field(default_factory=list)
     error_codes: list[str] = Field(default_factory=list)
@@ -113,7 +119,7 @@ async def retrieve(query: str) -> WikiEntry | None:
     if entry.is_stale:
         return None
 
-    normalized_score = hit["_score"] / MAX_POSSIBLE_SCORE
+    normalized_score = _normalize_score(hit["_score"])
     if normalized_score < NORMALIZED_SCORE_THRESHOLD:
         return None
 

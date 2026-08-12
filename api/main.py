@@ -5,10 +5,11 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import redis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -24,7 +25,15 @@ from api.dependencies import (
 )
 from api.rag import RagPipeline
 from api.rate_limit import is_within_rate_limit
-from api.schemas import ChatRequest, HealthStatus, IngestRequest, IngestResponse, SubgraphResponse
+from api.schemas import (
+    ChatRequest,
+    HealthStatus,
+    IngestRequest,
+    IngestResponse,
+    SubgraphResponse,
+    WikiSearchHit,
+    WikiStats,
+)
 from api.telemetry import configure_tracing
 from ingestion.loaders.base import BaseLoader
 from ingestion.loaders.confluence_loader import ConfluenceLoader
@@ -35,12 +44,21 @@ from ingestion.pipeline import IngestionPipeline
 from retrieval.graph_retriever import Neo4jGraphRetriever
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
 from retrieval.vector_retriever import ChromaVectorRetriever
-from wiki.db import create_wiki_index
+from wiki.db import (
+    create_wiki_index,
+    get_wiki_entry,
+    get_wiki_stats,
+    search_wiki_entries,
+    upsert_wiki_entry,
+)
 from wiki.invalidator import invalidate_stale
+from wiki.schema import WikiEntry
 
 logger = logging.getLogger(__name__)
 
 WIKI_INVALIDATION_INTERVAL_HOURS = 6
+VALIDATION_CONFIDENCE_BUMP = 0.1
+MAX_VALIDATED_CONFIDENCE = 0.95
 
 configure_tracing()
 
@@ -199,3 +217,61 @@ def graph_explore(
     entity_name: str, graph_retriever: Neo4jGraphRetriever = Depends(get_graph_retriever)
 ) -> SubgraphResponse:
     return SubgraphResponse(**graph_retriever.explore_subgraph(entity_name))
+
+
+wiki_router = APIRouter(prefix="/wiki")
+
+
+# /search and /stats are registered before /{entry_id} so those literal paths
+# aren't swallowed by the {entry_id} path parameter.
+@wiki_router.get("/search", response_model=list[WikiSearchHit])
+async def wiki_search(q: str, min_confidence: float = 0.5) -> list[WikiSearchHit]:
+    results = await search_wiki_entries(q, min_confidence)
+    return [WikiSearchHit(entry=entry, score=score) for entry, score in results]
+
+
+@wiki_router.get("/stats", response_model=WikiStats)
+async def wiki_stats() -> WikiStats:
+    return WikiStats(**await get_wiki_stats())
+
+
+@wiki_router.get("/{entry_id}", response_model=WikiEntry)
+async def wiki_get(entry_id: str) -> WikiEntry:
+    entry = await get_wiki_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Wiki entry not found")
+    return entry
+
+
+@wiki_router.post("/{entry_id}/validate", response_model=WikiEntry)
+async def wiki_validate(entry_id: str, x_engineer_id: str = Header(...)) -> WikiEntry:
+    entry = await get_wiki_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Wiki entry not found")
+
+    logger.info("Wiki entry id=%s validated by engineer_id=%s", entry_id, x_engineer_id)
+
+    validated = entry.model_copy(
+        update={
+            "confidence": min(entry.confidence + VALIDATION_CONFIDENCE_BUMP, MAX_VALIDATED_CONFIDENCE),
+            "last_validated": datetime.now(UTC),
+        }
+    )
+    await upsert_wiki_entry(validated)
+    return validated
+
+
+@wiki_router.delete("/{entry_id}", response_model=WikiEntry)
+async def wiki_delete(entry_id: str) -> WikiEntry:
+    entry = await get_wiki_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Wiki entry not found")
+
+    # Soft delete: the document stays in ES with confidence zeroed out, rather
+    # than being removed, so it drops out of search/stats without losing history.
+    deleted = entry.model_copy(update={"confidence": 0.0, "last_updated": datetime.now(UTC)})
+    await upsert_wiki_entry(deleted)
+    return deleted
+
+
+app.include_router(wiki_router)

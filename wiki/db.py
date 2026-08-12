@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from statistics import fmean
 
 from elasticsearch import NotFoundError
 
@@ -8,6 +9,14 @@ from api.dependencies import get_elasticsearch_client
 from wiki.schema import WikiEntry
 
 WIKI_INDEX = "wiki_entries"
+
+SEARCH_RESULT_SIZE = 5
+# Pragmatic cap for a full-index scan; stats and staleness both need per-entry
+# fields (is_stale) that ES can't aggregate without a scripted query, so this
+# module fetches candidates and computes those in Python instead - fine at the
+# scale a curated wiki index is expected to stay at.
+MAX_SCAN_SIZE = 1000
+HIGH_CONFIDENCE_THRESHOLD = 0.85
 
 WIKI_INDEX_MAPPING = {
     "properties": {
@@ -61,3 +70,49 @@ async def increment_hit_count(entry_id: str) -> None:
     await asyncio.to_thread(
         client.update, index=WIKI_INDEX, id=entry_id, script=INCREMENT_HIT_COUNT_SCRIPT
     )
+
+
+async def search_wiki_entries(
+    query: str, min_confidence: float, size: int = SEARCH_RESULT_SIZE
+) -> list[tuple[WikiEntry, float]]:
+    client = get_elasticsearch_client()
+    es_query = {
+        "bool": {
+            "must": [{"multi_match": {"query": query, "fields": ["title", "summary", "tags"]}}],
+            "filter": [{"range": {"confidence": {"gte": min_confidence}}}],
+        }
+    }
+    try:
+        response = await asyncio.to_thread(
+            client.search, index=WIKI_INDEX, query=es_query, size=size
+        )
+    except NotFoundError:
+        return []
+
+    return [
+        (WikiEntry(id=hit["_id"], **hit["_source"]), hit["_score"])
+        for hit in response["hits"]["hits"]
+    ]
+
+
+async def get_wiki_stats() -> dict:
+    client = get_elasticsearch_client()
+    try:
+        response = await asyncio.to_thread(
+            client.search, index=WIKI_INDEX, query={"match_all": {}}, size=MAX_SCAN_SIZE
+        )
+        hits = response["hits"]["hits"]
+    except NotFoundError:
+        hits = []
+
+    entries = [WikiEntry(id=hit["_id"], **hit["_source"]) for hit in hits]
+
+    return {
+        "total_entries": len(entries),
+        "avg_confidence": fmean(entry.confidence for entry in entries) if entries else 0.0,
+        "total_hits": sum(entry.hit_count for entry in entries),
+        "stale_count": sum(1 for entry in entries if entry.is_stale),
+        "high_confidence_count": sum(
+            1 for entry in entries if entry.confidence >= HIGH_CONFIDENCE_THRESHOLD
+        ),
+    }

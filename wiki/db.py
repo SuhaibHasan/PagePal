@@ -48,6 +48,11 @@ async def create_wiki_index() -> None:
         await asyncio.to_thread(client.indices.create, index=WIKI_INDEX, mappings=WIKI_INDEX_MAPPING)
 
 
+async def wiki_index_exists() -> bool:
+    client = get_elasticsearch_client()
+    return bool(await asyncio.to_thread(client.indices.exists, index=WIKI_INDEX))
+
+
 async def upsert_wiki_entry(entry: WikiEntry) -> None:
     client = get_elasticsearch_client()
     doc = entry.model_dump(mode="json", exclude={"id"})

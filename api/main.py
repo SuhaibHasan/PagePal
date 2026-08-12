@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -9,7 +10,7 @@ from datetime import UTC, datetime
 
 import redis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -50,6 +51,7 @@ from wiki.db import (
     get_wiki_stats,
     search_wiki_entries,
     upsert_wiki_entry,
+    wiki_index_exists,
 )
 from wiki.invalidator import invalidate_stale
 from wiki.schema import WikiEntry
@@ -129,6 +131,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(invalidate_stale, "interval", hours=WIKI_INVALIDATION_INTERVAL_HOURS)
     scheduler.start()
+    # Stashed on app.state so /health can report whether it's actually running -
+    # it's otherwise only reachable from inside this context manager.
+    app.state.wiki_scheduler = scheduler
 
     try:
         yield
@@ -148,7 +153,8 @@ app.add_middleware(
 
 
 @app.get("/health", response_model=HealthStatus)
-def health(
+async def health(
+    request: Request,
     redis_client: redis.Redis = Depends(get_redis_client),
     vector_retriever: ChromaVectorRetriever = Depends(get_vector_retriever),
     keyword_retriever: ElasticsearchKeywordRetriever = Depends(get_keyword_retriever),
@@ -163,10 +169,22 @@ def health(
         ("neo4j", graph_retriever.ping),
     ):
         try:
-            check()
+            await asyncio.to_thread(check)
             services[name] = "ok"
         except Exception as exc:  # noqa: BLE001
             services[name] = f"error: {exc}"
+
+    try:
+        services["wiki_index"] = (
+            "ok" if await wiki_index_exists() else "error: wiki_entries index does not exist"
+        )
+    except Exception as exc:  # noqa: BLE001
+        services["wiki_index"] = f"error: {exc}"
+
+    scheduler = getattr(request.app.state, "wiki_scheduler", None)
+    services["wiki_scheduler"] = (
+        "ok" if scheduler is not None and scheduler.running else "error: scheduler not running"
+    )
 
     overall = "ok" if all(status == "ok" for status in services.values()) else "degraded"
     return HealthStatus(status=overall, services=services)

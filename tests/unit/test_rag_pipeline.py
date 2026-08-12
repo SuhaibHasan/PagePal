@@ -167,3 +167,68 @@ async def test_answer_stream_trims_history_to_last_five_turns():
     ]
     # oldest turn (q0/a0) must have been evicted to make room
     assert {"role": "user", "content": "q0"} not in stored
+
+
+# --- Resilience: individual dependency failures must not fail the whole request ---
+
+
+class _FailingRetriever:
+    def retrieve(self, query, top_k, filters=None):
+        raise ConnectionError("neo4j unreachable")
+
+
+async def test_one_failing_retriever_does_not_fail_the_whole_answer():
+    pipeline, retrievers, *_ = make_pipeline(chunks=["answer despite one dead source"])
+    # RagPipeline holds the same dict object make_pipeline built, so mutating
+    # it here is reflected in the pipeline too.
+    retrievers["graph"] = _FailingRetriever()
+
+    events = await _collect(pipeline, "why is it down", "sess-1")
+
+    tokens = "".join(payload["text"] for event, payload in events if event == "token")
+    assert tokens == "answer despite one dead source"
+    assert events[-1] == ("done", {})
+
+
+async def test_wiki_lookup_failure_falls_back_to_full_rag(monkeypatch):
+    async def failing_wiki_retrieve(query):
+        raise ConnectionError("elasticsearch unreachable")
+
+    monkeypatch.setattr(rag_module, "wiki_retrieve", failing_wiki_retrieve)
+    pipeline, retrievers, *_ = make_pipeline(chunks=["RAG answer, wiki was unreachable"])
+
+    events = await _collect(pipeline, "why is it down", "sess-1")
+
+    tokens = "".join(payload["text"] for event, payload in events if event == "token")
+    assert tokens == "RAG answer, wiki was unreachable"
+    # proves the RAG path actually ran, not just that nothing crashed
+    assert retrievers["vector"].calls
+
+
+class _DownRedis:
+    def get(self, key):
+        raise ConnectionError("redis unreachable")
+
+    def setex(self, key, ttl, value):
+        raise ConnectionError("redis unreachable")
+
+
+async def test_redis_outage_during_history_load_degrades_to_no_history():
+    pipeline, _, _, answer_generator, _ = make_pipeline(chunks=["answer without history"])
+    pipeline._redis = _DownRedis()
+
+    events = await _collect(pipeline, "follow up", "sess-1")
+
+    assert answer_generator.astream_calls[0]["history"] == []
+    assert events[-1] == ("done", {})
+
+
+async def test_redis_outage_during_history_save_does_not_fail_the_request():
+    pipeline, *_ = make_pipeline(chunks=["answer that can't be persisted"])
+    pipeline._redis = _DownRedis()
+
+    events = await _collect(pipeline, "what happened", "sess-1")
+
+    tokens = "".join(payload["text"] for event, payload in events if event == "token")
+    assert tokens == "answer that can't be persisted"
+    assert events[-1] == ("done", {})

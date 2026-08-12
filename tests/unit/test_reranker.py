@@ -1,5 +1,5 @@
 from retrieval.models import RetrievalResult
-from retrieval.reranker import CrossEncoderReranker
+from retrieval.reranker import CrossEncoderReranker, PassthroughReranker
 
 
 class _FakeCrossEncoder:
@@ -122,3 +122,25 @@ def test_rerank_empty_lists_returns_empty():
 
     assert reranker.rerank("query", []) == []
     assert reranker.rerank("query", [[], []]) == []
+
+
+def test_passthrough_reranker_dedupes_without_needing_a_model():
+    # Used as the fallback when the cross-encoder model can't be loaded (e.g. no
+    # network access to HuggingFace Hub) - no CrossEncoder involved at all.
+    vector_results = [make_result("a", "vector"), make_result("b", "vector")]
+    keyword_results = [make_result("b", "keyword"), make_result("c", "keyword")]
+    reranker = PassthroughReranker()
+
+    fused = reranker.rerank("query", [vector_results, keyword_results])
+
+    assert [result.chunk_id for result in fused] == ["a", "b", "c"]
+    assert fused[1].source_type == "keyword+vector"
+
+
+def test_passthrough_reranker_respects_top_k():
+    results = [make_result(f"c{i}", "vector") for i in range(5)]
+    reranker = PassthroughReranker()
+
+    fused = reranker.rerank("query", [results], top_k=2)
+
+    assert len(fused) == 2

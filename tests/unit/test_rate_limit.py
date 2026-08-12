@@ -1,5 +1,7 @@
 import time
 
+import redis
+
 from api.rate_limit import RATE_LIMIT_MAX_REQUESTS, is_within_rate_limit
 
 
@@ -54,3 +56,16 @@ def test_requests_outside_the_window_are_evicted_and_free_up_capacity():
     redis_client.zadd(key, {f"old-{i}": old_time for i in range(RATE_LIMIT_MAX_REQUESTS)})
 
     assert is_within_rate_limit(redis_client, "session-1") is True
+
+
+class _DownRedis:
+    """Every call raises, like a real redis-py client would when Redis is down."""
+
+    def zremrangebyscore(self, key, min_score, max_score):
+        raise redis.ConnectionError("Redis unavailable")
+
+
+def test_fails_open_when_redis_is_unreachable():
+    # Rate limiting is a protective nice-to-have, not core functionality - an
+    # outage must not block every chat request.
+    assert is_within_rate_limit(_DownRedis(), "session-1") is True

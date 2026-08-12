@@ -96,22 +96,31 @@ class IngestionPipeline:
         return IngestionStats(documents=len(documents), chunks=len(chunks))
 
     def _queue_wiki_distillation(self, chunks: Sequence[Chunk]) -> None:
-        # Local import: wiki.distiller imports api.dependencies, which imports
-        # IngestionPipeline from this module - importing it at module level here
-        # would be a circular import.
+        # Local import: wiki.distiller (and wiki.invalidator) import api.dependencies,
+        # which imports IngestionPipeline from this module - importing them at module
+        # level here would be a circular import.
         from wiki.distiller import distill
+        from wiki.invalidator import invalidate_for_doc
 
         chunks_by_doc_id: dict[str, list[Chunk]] = defaultdict(list)
         for chunk in chunks:
             chunks_by_doc_id[chunk.doc_id].append(chunk)
 
         for doc_id, doc_chunks in chunks_by_doc_id.items():
-            task = asyncio.create_task(distill([self._to_distiller_chunk(c) for c in doc_chunks]))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            distiller_chunks = [self._to_distiller_chunk(c) for c in doc_chunks]
+            self._track_background_task(distill(distiller_chunks))
             logger.info(
                 "Wiki distillation queued for doc_id=%s, chunks=%d", doc_id, len(doc_chunks)
             )
+            # Any other wiki entry that cites this doc_id as a source may now be
+            # stale too (the doc's content just changed), independent of the
+            # distillation of the doc's own entry queued above.
+            self._track_background_task(invalidate_for_doc(doc_id))
+
+    def _track_background_task(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @staticmethod
     def _to_distiller_chunk(chunk: Chunk) -> dict:

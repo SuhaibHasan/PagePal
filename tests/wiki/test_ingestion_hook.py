@@ -110,6 +110,17 @@ def distill_calls(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _fake_invalidate_for_doc(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_invalidate(doc_id: str) -> None:
+        calls.append(doc_id)
+
+    monkeypatch.setattr("wiki.invalidator.invalidate_for_doc", fake_invalidate)
+    return calls
+
+
 def make_pipeline() -> IngestionPipeline:
     return IngestionPipeline(
         chroma_client=_FakeChromaClient(),

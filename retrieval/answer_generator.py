@@ -7,6 +7,7 @@ import anthropic
 from pydantic import BaseModel, Field
 
 from retrieval.models import RetrievalResult
+from wiki.schema import WikiEntry
 
 # claude-sonnet-4-6 doesn't exist; claude-sonnet-5 is the current Sonnet model.
 SONNET_MODEL = "claude-sonnet-5"
@@ -19,6 +20,13 @@ SYSTEM_PROMPT = (
     "If the answer isn't in the context, say so. Cite sources as [Source N]. "
     "If graph paths are provided, use them to explain service impact chains."
 )
+
+WIKI_SYSTEM_PROMPT = (
+    SYSTEM_PROMPT
+    + " A pre-validated wiki entry is available. Prefer it but supplement with your reasoning."
+)
+
+WIKI_RETRIEVAL_PATH = "wiki"
 
 CITATION_PATTERN = re.compile(r"\[Source (\d+)\]")
 
@@ -82,6 +90,44 @@ class AnswerGenerator:
         ) as stream:
             async for text in stream.text_stream:
                 yield text
+
+    async def from_wiki(
+        self,
+        query: str,
+        entry: WikiEntry,
+        history: list[HistoryTurn] | None = None,
+    ) -> AsyncIterator[str]:
+        user_message = f"{self._format_wiki_entry(entry)}\n\nQuestion: {query}"
+        messages = [*(history or []), {"role": "user", "content": user_message}]
+
+        async with self._async_llm.messages.stream(
+            model=self._model,
+            max_tokens=1024,
+            system=WIKI_SYSTEM_PROMPT,
+            messages=messages,
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
+
+    @staticmethod
+    def build_wiki_citations(entry: WikiEntry) -> list[Citation]:
+        return [Citation(title=entry.title, retrieval_path=WIKI_RETRIEVAL_PATH)]
+
+    @staticmethod
+    def _format_wiki_entry(entry: WikiEntry) -> str:
+        # Structured, human-readable text - not raw JSON - so it reads the same
+        # way retrieved chunk context does in the prompt.
+        lines = [f"Title: {entry.title}", f"Summary: {entry.summary}"]
+        if entry.root_cause:
+            lines.append(f"Root Cause: {entry.root_cause}")
+        if entry.resolution_steps:
+            steps = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(entry.resolution_steps))
+            lines.append(f"Resolution Steps:\n{steps}")
+        if entry.affected_services:
+            lines.append(f"Affected Services: {', '.join(entry.affected_services)}")
+        if entry.source_refs:
+            lines.append(f"Source References: {', '.join(entry.source_refs)}")
+        return "\n\n".join(lines)
 
     def build_citations(self, answer_text: str, top_context: list[RetrievalResult]) -> list[Citation]:
         cited_numbers = sorted({int(match) for match in CITATION_PATTERN.findall(answer_text)})

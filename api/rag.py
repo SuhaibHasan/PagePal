@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 
 import redis
@@ -10,10 +11,13 @@ from api.config import Settings
 from api.telemetry import tracer
 from retrieval.answer_generator import AnswerGenerator, HistoryTurn
 from retrieval.base import BaseRetriever
-from retrieval.reranker import CrossEncoderReranker
+from retrieval.models import RetrievalResult
+from retrieval.reranker import Reranker
 from wiki.retriever import retrieve as wiki_retrieve
 from wiki.schema import WikiEntry
 from wiki.writer import upsert_from_rag as wiki_upsert_from_rag
+
+logger = logging.getLogger(__name__)
 
 SESSION_TTL_SECONDS = 3600
 MAX_HISTORY_TURNS = 5
@@ -23,7 +27,7 @@ class RagPipeline:
     def __init__(
         self,
         retrievers: dict[str, BaseRetriever],
-        reranker: CrossEncoderReranker,
+        reranker: Reranker,
         answer_generator: AnswerGenerator,
         redis_client: redis.Redis,
         settings: Settings,
@@ -48,8 +52,15 @@ class RagPipeline:
             history = await self._load_history(session_id)
 
             # 1. Try the wiki first - a pre-validated, high-confidence entry skips
-            # the full retrieval + rerank + generation path entirely.
-            wiki_entry = await wiki_retrieve(query)
+            # the full retrieval + rerank + generation path entirely. A lookup
+            # failure (e.g. Elasticsearch unreachable) degrades to "no wiki hit"
+            # rather than failing the whole chat request.
+            try:
+                wiki_entry = await wiki_retrieve(query)
+            except Exception:
+                logger.warning("Wiki lookup failed; falling back to full RAG", exc_info=True)
+                wiki_entry = None
+
             if wiki_entry is not None:
                 async for event, payload in self._answer_from_wiki(
                     query, session_id, wiki_entry, history
@@ -117,14 +128,27 @@ class RagPipeline:
 
     async def _retrieve(
         self, name: str, retriever: BaseRetriever, query: str, filters: dict[str, str] | None
-    ):
+    ) -> list[RetrievalResult]:
         with tracer.start_as_current_span(f"retrieval.{name}"):
-            return await asyncio.to_thread(
-                retriever.retrieve, query, self._settings.retrieval_top_k, filters
-            )
+            try:
+                return await asyncio.to_thread(
+                    retriever.retrieve, query, self._settings.retrieval_top_k, filters
+                )
+            except Exception:
+                # One source being down (e.g. Neo4j) shouldn't take the other
+                # two with it - asyncio.gather would otherwise fail the whole
+                # batch on the first exception.
+                logger.warning(
+                    "Retrieval source %r failed; continuing without it", name, exc_info=True
+                )
+                return []
 
     async def _load_history(self, session_id: str) -> list[HistoryTurn]:
-        raw = await asyncio.to_thread(self._redis.get, self._session_key(session_id))
+        try:
+            raw = await asyncio.to_thread(self._redis.get, self._session_key(session_id))
+        except Exception:
+            logger.warning("Redis unavailable; continuing without session history", exc_info=True)
+            return []
         if not raw:
             return []
         return json.loads(raw)
@@ -134,12 +158,17 @@ class RagPipeline:
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": answer})
         trimmed = history[-(MAX_HISTORY_TURNS * 2) :]
-        await asyncio.to_thread(
-            self._redis.setex,
-            self._session_key(session_id),
-            SESSION_TTL_SECONDS,
-            json.dumps(trimmed),
-        )
+        try:
+            await asyncio.to_thread(
+                self._redis.setex,
+                self._session_key(session_id),
+                SESSION_TTL_SECONDS,
+                json.dumps(trimmed),
+            )
+        except Exception:
+            logger.warning(
+                "Redis unavailable; could not persist session history", exc_info=True
+            )
 
     @staticmethod
     def _session_key(session_id: str) -> str:

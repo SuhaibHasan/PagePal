@@ -83,16 +83,22 @@ async def _process_stale_entry(entry: WikiEntry, collection, counts: dict[str, i
 
 
 async def invalidate_stale() -> dict[str, int]:
-    es_client = get_elasticsearch_client()
-    collection = _get_collection()
-
-    threshold = datetime.now(UTC) - timedelta(days=DEFAULT_TTL_DAYS)
-    query = {"range": {"last_updated": {"lt": threshold.isoformat()}}}
-    response = await asyncio.to_thread(
-        es_client.search, index=WIKI_INDEX, query=query, size=MAX_CANDIDATES
-    )
-
     counts = {"refreshed": 0, "redistilled": 0, "soft_deleted": 0}
+
+    try:
+        es_client = get_elasticsearch_client()
+        collection = _get_collection()
+
+        threshold = datetime.now(UTC) - timedelta(days=DEFAULT_TTL_DAYS)
+        query = {"range": {"last_updated": {"lt": threshold.isoformat()}}}
+        response = await asyncio.to_thread(
+            es_client.search, index=WIKI_INDEX, query=query, size=MAX_CANDIDATES
+        )
+    except Exception:
+        # Runs on a 6-hour APScheduler interval - a failed sweep should just be
+        # retried next cycle, not surface anywhere a request is waiting on it.
+        logger.exception("Wiki staleness sweep failed to query Elasticsearch")
+        return counts
 
     for hit in response["hits"]["hits"]:
         entry = WikiEntry(id=hit["_id"], **hit["_source"])

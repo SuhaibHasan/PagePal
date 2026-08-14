@@ -80,6 +80,9 @@ async def _upsert_from_rag(query: str, answer: str, citations: list[dict]) -> No
                 "affected_services": _dedupe_preserve_order(
                     existing.affected_services + candidate.affected_services
                 ),
+                "related_error_codes": _dedupe_preserve_order(
+                    existing.related_error_codes + candidate.related_error_codes
+                ),
                 "tags": _dedupe_preserve_order(existing.tags + candidate.tags),
                 "confidence": min(existing.confidence + CONFIDENCE_BUMP, MAX_MERGED_CONFIDENCE),
                 "last_updated": now,

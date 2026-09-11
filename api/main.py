@@ -14,6 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPEx
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from api.auth import require_api_key
 from api.config import Settings, get_settings
 from api.dependencies import (
     get_answer_generator,
@@ -256,7 +257,12 @@ async def chat(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/ingest", response_model=IngestResponse, status_code=202)
+@app.post(
+    "/ingest",
+    response_model=IngestResponse,
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+)
 async def ingest(
     request: IngestRequest,
     background_tasks: BackgroundTasks,
@@ -298,7 +304,9 @@ async def wiki_get(entry_id: str) -> WikiEntry:
     return entry
 
 
-@wiki_router.post("/{entry_id}/validate", response_model=WikiEntry)
+@wiki_router.post(
+    "/{entry_id}/validate", response_model=WikiEntry, dependencies=[Depends(require_api_key)]
+)
 async def wiki_validate(entry_id: str, x_engineer_id: str = Header(...)) -> WikiEntry:
     entry = await get_wiki_entry(entry_id)
     if entry is None:
@@ -316,7 +324,9 @@ async def wiki_validate(entry_id: str, x_engineer_id: str = Header(...)) -> Wiki
     return validated
 
 
-@wiki_router.delete("/{entry_id}", response_model=WikiEntry)
+@wiki_router.delete(
+    "/{entry_id}", response_model=WikiEntry, dependencies=[Depends(require_api_key)]
+)
 async def wiki_delete(entry_id: str) -> WikiEntry:
     entry = await get_wiki_entry(entry_id)
     if entry is None:

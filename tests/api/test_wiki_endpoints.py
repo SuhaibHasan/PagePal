@@ -7,6 +7,7 @@ import pytest
 from elasticsearch import NotFoundError
 
 import wiki.db as db_module
+from api.config import Settings, get_settings
 from api.main import app
 from wiki.schema import WikiEntry
 
@@ -87,6 +88,12 @@ async def client():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as async_client:
         yield async_client
+
+
+@pytest.fixture(autouse=True)
+def _clear_overrides():
+    yield
+    app.dependency_overrides.clear()
 
 
 async def test_search_returns_only_matching_and_confident_enough_results(fake_es, client):
@@ -176,6 +183,29 @@ async def test_validate_404s_when_entry_missing(fake_es, client):
     assert response.status_code == 404
 
 
+async def test_validate_rejects_requests_without_the_configured_api_key(fake_es, client):
+    fake_es.seed(make_entry("payment-1", confidence=0.7))
+    app.dependency_overrides[get_settings] = lambda: Settings(api_key="secret123")
+
+    response = await client.post(
+        "/wiki/payment-1/validate", headers={"X-Engineer-Id": "eng-42"}
+    )
+
+    assert response.status_code == 401
+
+
+async def test_validate_accepts_the_correct_api_key(fake_es, client):
+    fake_es.seed(make_entry("payment-1", confidence=0.7))
+    app.dependency_overrides[get_settings] = lambda: Settings(api_key="secret123")
+
+    response = await client.post(
+        "/wiki/payment-1/validate",
+        headers={"X-Engineer-Id": "eng-42", "X-API-Key": "secret123"},
+    )
+
+    assert response.status_code == 200
+
+
 async def test_delete_sets_confidence_to_zero_without_removing_the_document(fake_es, client):
     fake_es.seed(make_entry("payment-1", confidence=0.8))
 
@@ -192,6 +222,27 @@ async def test_delete_404s_when_entry_missing(fake_es, client):
     response = await client.delete("/wiki/does-not-exist")
 
     assert response.status_code == 404
+
+
+async def test_delete_rejects_requests_without_the_configured_api_key(fake_es, client):
+    fake_es.seed(make_entry("payment-1", confidence=0.8))
+    app.dependency_overrides[get_settings] = lambda: Settings(api_key="secret123")
+
+    response = await client.delete("/wiki/payment-1")
+
+    assert response.status_code == 401
+    # nothing was touched
+    assert fake_es.docs["payment-1"]["confidence"] == 0.8
+
+
+async def test_delete_accepts_the_correct_api_key(fake_es, client):
+    fake_es.seed(make_entry("payment-1", confidence=0.8))
+    app.dependency_overrides[get_settings] = lambda: Settings(api_key="secret123")
+
+    response = await client.delete("/wiki/payment-1", headers={"X-API-Key": "secret123"})
+
+    assert response.status_code == 200
+    assert response.json()["confidence"] == 0.0
 
 
 async def test_stats_returns_correct_counts(fake_es, client):

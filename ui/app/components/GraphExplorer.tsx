@@ -43,38 +43,46 @@ export function GraphExplorer({
   suggestedEntities: string[];
 }) {
   const [inputValue, setInputValue] = useState(entityName ?? "");
+  const [prevEntityName, setPrevEntityName] = useState(entityName);
   const [subgraph, setSubgraph] = useState<Subgraph | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
-  // Fetch whenever the parent-controlled entity changes (e.g. a citation chip click).
-  useEffect(() => {
+  // Keep the input in sync with the parent-controlled entity (e.g. a citation chip
+  // click) without an effect - adjusting state during render avoids the extra commit.
+  if (entityName !== prevEntityName) {
+    setPrevEntityName(entityName);
     setInputValue(entityName ?? "");
     if (!entityName) {
       setSubgraph(null);
       setError(null);
-      return;
     }
+  }
+
+  // Fetch whenever the parent-controlled entity changes (e.g. a citation chip click).
+  useEffect(() => {
+    if (!entityName) return;
 
     let cancelled = false;
-    setIsLoading(true);
-    setError(null);
 
-    fetchSubgraph(entityName)
-      .then((data) => {
+    async function run() {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const data = await fetchSubgraph(entityName as string);
         if (!cancelled) setSubgraph(data);
-      })
-      .catch((err: Error) => {
+      } catch (err) {
         if (!cancelled) {
-          setError(err.message);
+          setError((err as Error).message);
           setSubgraph(null);
         }
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setIsLoading(false);
-      });
+      }
+    }
+    run();
 
     return () => {
       cancelled = true;

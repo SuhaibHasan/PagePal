@@ -389,7 +389,7 @@ npm install
 npm run dev
 ```
 
-Next.js 14 (App Router) + Tailwind, dark theme only, in three panels:
+Next.js 16 (App Router) + Tailwind, dark theme only, in three panels:
 
 - **Chat** (`app/components/ChatPanel.tsx`) — streams `POST /chat`'s SSE response token-by-token
   (`app/lib/sse.ts` parses `text/event-stream` off a `fetch` body, since native `EventSource`

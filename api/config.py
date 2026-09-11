@@ -26,6 +26,12 @@ class Settings(BaseSettings):
 
     api_cors_origins: str = "http://localhost:3000"
 
+    # Gates POST /ingest and the wiki write endpoints (validate/delete) - see
+    # api/auth.py. Empty (the default) leaves them open, e.g. for local dev or a
+    # read-mostly public demo where /chat and the wiki reads still need to work
+    # without a key.
+    api_key: str = ""
+
     retrieval_top_k: int = 10
     rerank_top_k: int = 8
 

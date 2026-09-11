@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from api.config import get_settings
+from api.config import Settings, get_settings
 from api.dependencies import (
     get_graph_retriever,
     get_ingestion_pipeline,
@@ -266,6 +266,38 @@ def test_ingest_requires_path_for_local_source(client):
     response = client.post("/ingest", json={"source_type": "local"})
 
     assert response.status_code == 422
+
+
+def test_ingest_open_by_default_when_no_api_key_is_configured(client):
+    # api_key defaults to "" - no override needed, matches out-of-the-box behavior.
+    app.dependency_overrides[get_ingestion_pipeline] = lambda: _FakeIngestionPipeline()
+
+    response = client.post("/ingest", json={"source_type": "local", "path": "/tmp/runbooks"})
+
+    assert response.status_code == 202
+
+
+def test_ingest_rejects_requests_without_the_configured_api_key(client):
+    app.dependency_overrides[get_ingestion_pipeline] = lambda: _FakeIngestionPipeline()
+    app.dependency_overrides[get_settings] = lambda: Settings(api_key="secret123")
+
+    response = client.post("/ingest", json={"source_type": "local", "path": "/tmp/runbooks"})
+
+    assert response.status_code == 401
+
+
+def test_ingest_accepts_the_correct_api_key(client):
+    fake_pipeline = _FakeIngestionPipeline()
+    app.dependency_overrides[get_ingestion_pipeline] = lambda: fake_pipeline
+    app.dependency_overrides[get_settings] = lambda: Settings(api_key="secret123")
+
+    response = client.post(
+        "/ingest",
+        json={"source_type": "local", "path": "/tmp/runbooks"},
+        headers={"X-API-Key": "secret123"},
+    )
+
+    assert response.status_code == 202
 
 
 def test_graph_explore_returns_nodes_and_edges(client):

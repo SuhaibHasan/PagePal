@@ -28,6 +28,12 @@ Also graceful under failure: every external dependency (Redis, Chroma, Elasticse
 the reranker's model weights) can go down independently without taking `/chat` with it — see
 [Resilience](#resilience).
 
+![ProdSupportBuddy UI: a chat answer with wiki and hybrid-retrieval citations next to a force-directed graph of the affected services](docs/screenshot.png)
+
+*Answer citations are tagged by which retriever(s) contributed (Wiki fast path, Hybrid
+vector+keyword, ...); clicking an entity chip in a citation's graph path pivots the Graph
+Explorer to that entity's subgraph.*
+
 ## Architecture
 
 ```mermaid

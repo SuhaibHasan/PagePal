@@ -17,13 +17,13 @@ except ImportError:  # pragma: no cover
 
 ES_IMAGE = "docker.elastic.co/elasticsearch/elasticsearch:8.15.3"
 
-# Individual request timeout for the test client. Generous because a freshly
-# started single-node cluster's first heavier write (e.g. an index create) can
-# be slow on a loaded CI runner even after cluster health reports ready.
+# Individual request timeout for the test client.
 CLIENT_REQUEST_TIMEOUT = 30
 
-# How long to wait for the container to report a healthy cluster before giving up.
-CLUSTER_HEALTH_TIMEOUT = 60
+# How long to wait for the container to actually serve an index create/delete
+# cycle before giving up (see _wait_for_es_ready).
+ES_READY_TIMEOUT = 90
+ES_READY_PROBE_INDEX = "_readiness_probe"
 
 
 def make_entry(**overrides) -> WikiEntry:
@@ -45,27 +45,28 @@ def _container_url(container) -> str:
     return f"http://{container.get_container_host_ip()}:{container.get_exposed_port(container.port)}"
 
 
-def _wait_for_cluster_health(container, timeout_seconds: float = CLUSTER_HEALTH_TIMEOUT) -> None:
-    # testcontainers' own wait strategy only waits for the port to open - a freshly
-    # started single-node cluster can still be forming for several more seconds,
-    # long enough that the first real request (e.g. an index create) exceeds the
-    # client's request timeout on a cold CI runner. Block here on actual cluster
-    # health instead, so tests never race startup.
+def _wait_for_es_ready(container, timeout_seconds: float = ES_READY_TIMEOUT) -> None:
+    # testcontainers' wait strategy only waits for a plain GET / to return 200, and
+    # a fresh single-node cluster reports "green" cluster health almost immediately
+    # too (trivially true with zero indices) - neither proves the cluster can serve
+    # a real write. The actual slow operation on a cold CI runner is index creation
+    # (first Lucene/translog init), so probe with that exact operation instead of a
+    # weaker proxy, and keep retrying until it succeeds.
     url = _container_url(container)
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
     while time.monotonic() < deadline:
-        probe = Elasticsearch(url, request_timeout=5)
+        probe = Elasticsearch(url, request_timeout=20)
         try:
-            health = probe.cluster.health(wait_for_status="yellow", timeout="5s")
-            if health.get("status") in ("yellow", "green"):
-                return
+            probe.indices.create(index=ES_READY_PROBE_INDEX)
+            probe.indices.delete(index=ES_READY_PROBE_INDEX, ignore_unavailable=True)
+            return
         except Exception as exc:  # noqa: BLE001 - retrying until the deadline
             last_error = exc
         finally:
             probe.close()
-        time.sleep(1)
-    raise RuntimeError(f"Elasticsearch test container never became healthy: {last_error}")
+        time.sleep(2)
+    raise RuntimeError(f"Elasticsearch test container never became ready for writes: {last_error}")
 
 
 @pytest.fixture(scope="module")
@@ -77,7 +78,7 @@ def es_container():
         container = ElasticSearchContainer(ES_IMAGE)
         container.with_env("discovery.type", "single-node")
         container.start()
-        _wait_for_cluster_health(container)
+        _wait_for_es_ready(container)
     except Exception as exc:  # noqa: BLE001 - environment-dependent, not a code defect
         pytest.skip(f"Docker is unavailable to run the Elasticsearch test container: {exc}")
 

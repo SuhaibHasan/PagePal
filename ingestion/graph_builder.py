@@ -114,6 +114,8 @@ class GraphBuilder:
         self._llm = anthropic_client or anthropic.AsyncAnthropic()
         self._model = model
         self._semaphore = asyncio.Semaphore(concurrency)
+        self._constraints_ready = False
+        self._constraints_lock = asyncio.Lock()
 
     async def build(self, chunks: Sequence[Chunk]) -> None:
         await asyncio.gather(*(self._process_chunk(chunk) for chunk in chunks))
@@ -125,8 +127,29 @@ class GraphBuilder:
         if not extraction.entities:
             return
 
+        # Chunks are processed concurrently (see build()), so without a uniqueness
+        # constraint two chunks mentioning the same entity can each MERGE-create their
+        # own node: both open independent transactions and can each see "not found"
+        # before either commits. The constraint makes concurrent MERGEs on the same
+        # (label, name) serialize instead of racing.
+        await self._ensure_constraints()
+
         async with self._driver.session() as session:
             await session.execute_write(self._merge_extraction, chunk, extraction)
+
+    async def _ensure_constraints(self) -> None:
+        if self._constraints_ready:
+            return
+        async with self._constraints_lock:
+            if self._constraints_ready:
+                return
+            async with self._driver.session() as session:
+                for entity_type in EntityType:
+                    await session.run(
+                        f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{entity_type.value}) "
+                        "REQUIRE n.name IS UNIQUE"
+                    )
+            self._constraints_ready = True
 
     async def _extract(self, chunk: Chunk) -> ExtractionResult:
         try:

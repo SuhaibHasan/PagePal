@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 
@@ -15,6 +16,14 @@ except ImportError:  # pragma: no cover
     ElasticSearchContainer = None
 
 ES_IMAGE = "docker.elastic.co/elasticsearch/elasticsearch:8.15.3"
+
+# Individual request timeout for the test client. Generous because a freshly
+# started single-node cluster's first heavier write (e.g. an index create) can
+# be slow on a loaded CI runner even after cluster health reports ready.
+CLIENT_REQUEST_TIMEOUT = 30
+
+# How long to wait for the container to report a healthy cluster before giving up.
+CLUSTER_HEALTH_TIMEOUT = 60
 
 
 def make_entry(**overrides) -> WikiEntry:
@@ -32,6 +41,33 @@ def make_entry(**overrides) -> WikiEntry:
     return WikiEntry(**defaults)
 
 
+def _container_url(container) -> str:
+    return f"http://{container.get_container_host_ip()}:{container.get_exposed_port(container.port)}"
+
+
+def _wait_for_cluster_health(container, timeout_seconds: float = CLUSTER_HEALTH_TIMEOUT) -> None:
+    # testcontainers' own wait strategy only waits for the port to open - a freshly
+    # started single-node cluster can still be forming for several more seconds,
+    # long enough that the first real request (e.g. an index create) exceeds the
+    # client's request timeout on a cold CI runner. Block here on actual cluster
+    # health instead, so tests never race startup.
+    url = _container_url(container)
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        probe = Elasticsearch(url, request_timeout=5)
+        try:
+            health = probe.cluster.health(wait_for_status="yellow", timeout="5s")
+            if health.get("status") in ("yellow", "green"):
+                return
+        except Exception as exc:  # noqa: BLE001 - retrying until the deadline
+            last_error = exc
+        finally:
+            probe.close()
+        time.sleep(1)
+    raise RuntimeError(f"Elasticsearch test container never became healthy: {last_error}")
+
+
 @pytest.fixture(scope="module")
 def es_container():
     if ElasticSearchContainer is None:
@@ -41,6 +77,7 @@ def es_container():
         container = ElasticSearchContainer(ES_IMAGE)
         container.with_env("discovery.type", "single-node")
         container.start()
+        _wait_for_cluster_health(container)
     except Exception as exc:  # noqa: BLE001 - environment-dependent, not a code defect
         pytest.skip(f"Docker is unavailable to run the Elasticsearch test container: {exc}")
 
@@ -50,11 +87,7 @@ def es_container():
 
 @pytest.fixture
 def client(es_container) -> Iterator[Elasticsearch]:
-    url = (
-        f"http://{es_container.get_container_host_ip()}:"
-        f"{es_container.get_exposed_port(es_container.port)}"
-    )
-    es_client = Elasticsearch(url)
+    es_client = Elasticsearch(_container_url(es_container), request_timeout=CLIENT_REQUEST_TIMEOUT)
     yield es_client
     es_client.indices.delete(index=db.WIKI_INDEX, ignore_unavailable=True)
     es_client.close()

@@ -1,5 +1,8 @@
 # ProdSupportBuddy
 
+[![CI](https://github.com/SuhaibHasan/ProdSupportBuddy/actions/workflows/ci.yml/badge.svg)](https://github.com/SuhaibHasan/ProdSupportBuddy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A RAG-powered assistant that helps engineers resolve production incidents by retrieving
 relevant runbooks, postmortems, and prior incidents from a hybrid vector/keyword/graph
 knowledge base and answering with a Claude model — then **teaching itself** from every
@@ -448,3 +451,7 @@ a deliberate, manually-triggered report, not something that runs in CI on every 
 `ragas`/`langchain-anthropic`/`datasets` dependencies live in a separate `eval` uv group for the
 same reason; `uv sync` alone won't install them, and `tests/eval/test_ragas_eval.py` (fast, no
 network) skips itself if they're absent.
+
+## License
+
+[MIT](LICENSE)

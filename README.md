@@ -105,6 +105,10 @@ docker compose up -d
 
 Neo4j Browser credentials default to `neo4j` / `prodsupportbuddy` (see `docker-compose.yml`).
 
+This setup is single-user by design — every `docker compose up` starts an empty knowledge base.
+For running one shared, persistent instance a team reads and writes together, see
+[the team deployment rollout](docs/team-deployment-rollout.md).
+
 ## API
 
 ```bash

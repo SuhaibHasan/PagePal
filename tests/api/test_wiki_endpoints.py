@@ -58,6 +58,13 @@ class _FakeEsClient:
         return {"hits": {"hits": hits}}
 
 
+class _FailingEsClient:
+    # Simulates Elasticsearch being unreachable (a connection failure), not the
+    # NotFoundError case (index missing) the other fake already covers.
+    def search(self, index, query, size):
+        raise ConnectionError("Elasticsearch is unreachable")
+
+
 def make_entry(entry_id: str, **overrides) -> WikiEntry:
     now = datetime.now(UTC)
     defaults = {
@@ -268,6 +275,34 @@ async def test_stats_returns_correct_counts(fake_es, client):
 
 
 async def test_stats_with_no_entries(fake_es, client):
+    response = await client.get("/wiki/stats")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "total_entries": 0,
+        "avg_confidence": 0.0,
+        "total_hits": 0,
+        "stale_count": 0,
+        "high_confidence_count": 0,
+    }
+
+
+async def test_search_degrades_to_empty_results_when_elasticsearch_is_unreachable(
+    monkeypatch, client
+):
+    monkeypatch.setattr(db_module, "get_elasticsearch_client", lambda: _FailingEsClient())
+
+    response = await client.get("/wiki/search", params={"q": "payment"})
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_stats_degrades_to_zeroed_counts_when_elasticsearch_is_unreachable(
+    monkeypatch, client
+):
+    monkeypatch.setattr(db_module, "get_elasticsearch_client", lambda: _FailingEsClient())
+
     response = await client.get("/wiki/stats")
 
     assert response.status_code == 200

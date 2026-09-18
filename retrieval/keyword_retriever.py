@@ -101,8 +101,14 @@ class ElasticsearchKeywordRetriever(BaseRetriever):
             for hit in hits
         ]
 
-    def ping(self) -> bool:
-        return bool(self._client.ping())
+    def ping(self) -> None:
+        # elasticsearch-py's Elasticsearch.ping() is documented to swallow connection
+        # errors and return False rather than raise - unlike every other client method
+        # (and unlike Chroma's/Neo4j's ping equivalents). Raise here instead, so a
+        # down Elasticsearch surfaces the same way to callers like GET /health, which
+        # only catches exceptions and never inspects a return value.
+        if not self._client.ping():
+            raise ConnectionError("Elasticsearch ping failed")
 
     def _extract_filters(self, query: str) -> QueryFilters:
         try:

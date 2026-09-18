@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from statistics import fmean
 
 from elasticsearch import NotFoundError
 
 from api.dependencies import get_elasticsearch_client
 from wiki.schema import WikiEntry
+
+logger = logging.getLogger(__name__)
 
 WIKI_INDEX = "wiki_entries"
 
@@ -93,6 +96,9 @@ async def search_wiki_entries(
         )
     except NotFoundError:
         return []
+    except Exception:
+        logger.warning("Wiki search failed; Elasticsearch may be unreachable", exc_info=True)
+        return []
 
     return [
         (WikiEntry(id=hit["_id"], **hit["_source"]), hit["_score"])
@@ -108,6 +114,9 @@ async def get_wiki_stats() -> dict:
         )
         hits = response["hits"]["hits"]
     except NotFoundError:
+        hits = []
+    except Exception:
+        logger.warning("Wiki stats query failed; Elasticsearch may be unreachable", exc_info=True)
         hits = []
 
     entries = [WikiEntry(id=hit["_id"], **hit["_source"]) for hit in hits]

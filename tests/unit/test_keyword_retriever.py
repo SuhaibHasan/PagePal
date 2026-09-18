@@ -1,5 +1,6 @@
 import anthropic
 import httpx
+import pytest
 
 from retrieval.keyword_retriever import ElasticsearchKeywordRetriever
 
@@ -39,16 +40,17 @@ NO_FILTERS_PAYLOAD = {"service": None, "severity": None, "error_code": None, "da
 
 
 class _FakeElasticsearch:
-    def __init__(self, hits: list[dict] | None = None) -> None:
+    def __init__(self, hits: list[dict] | None = None, ping_result: bool = True) -> None:
         self._hits = hits or []
         self.search_calls: list[dict] = []
+        self._ping_result = ping_result
 
     def search(self, *, index, query, size):
         self.search_calls.append({"index": index, "query": query, "size": size})
         return {"hits": {"hits": self._hits}}
 
     def ping(self) -> bool:
-        return True
+        return self._ping_result
 
 
 def make_hit(chunk_id: str = "doc-1::0", score: float = 5.4) -> dict:
@@ -239,4 +241,17 @@ def test_ping_delegates_to_client():
         es, anthropic_client=_filters_client(NO_FILTERS_PAYLOAD)
     )
 
-    assert retriever.ping() is True
+    retriever.ping()  # does not raise
+
+
+def test_ping_raises_when_client_ping_returns_false():
+    # elasticsearch-py's own Elasticsearch.ping() swallows connection errors and
+    # returns False instead of raising - this must not leak through as a silent
+    # "ok", since GET /health only catches exceptions, not return values.
+    es = _FakeElasticsearch(ping_result=False)
+    retriever = ElasticsearchKeywordRetriever(
+        es, anthropic_client=_filters_client(NO_FILTERS_PAYLOAD)
+    )
+
+    with pytest.raises(ConnectionError):
+        retriever.ping()

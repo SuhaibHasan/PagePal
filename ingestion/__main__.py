@@ -77,7 +77,7 @@ async def _run(loaders: list[BaseLoader]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest documents into ProdSupportBuddy stores")
+    parser = argparse.ArgumentParser(description="Ingest documents into PagePal stores")
     parser.add_argument("--local-dir", help="Directory of local markdown/PDF runbooks")
     parser.add_argument("--pagerduty-dir", help="Directory of PagerDuty incident JSON exports")
     parser.add_argument("--confluence-space", help="Confluence space key to ingest")

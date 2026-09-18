@@ -5,7 +5,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 
-SERVICE_NAME = "prodsupportbuddy-api"
+SERVICE_NAME = "pagepal-api"
 
 _configured = False
 

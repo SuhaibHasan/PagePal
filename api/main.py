@@ -179,7 +179,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="ProdSupportBuddy API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="PagePal API", version="0.1.0", lifespan=lifespan)
 
 _settings = get_settings()
 app.add_middleware(

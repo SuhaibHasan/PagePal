@@ -75,7 +75,7 @@ export default function HomePage() {
 
       <section className="flex min-w-0 flex-1 flex-col border-r border-slate-800">
         <header className="border-b border-slate-800 px-4 py-3">
-          <h1 className="text-lg font-semibold">ProdSupportBuddy</h1>
+          <h1 className="text-lg font-semibold">PagePal</h1>
           <p className="text-xs text-slate-500">Hybrid RAG assistant for production incidents</p>
         </header>
         <div className="min-h-0 flex-1">

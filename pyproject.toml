@@ -1,5 +1,5 @@
 [project]
-name = "prod-support-buddy"
+name = "pagepal"
 version = "0.1.0"
 description = "RAG-powered assistant for resolving production issues"
 readme = "README.md"

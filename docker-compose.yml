@@ -1,7 +1,7 @@
 services:
   chromadb:
     image: chromadb/chroma:0.5.20
-    container_name: psb-chromadb
+    container_name: pagepal-chromadb
     ports:
       - "8000:8000"
     volumes:
@@ -17,11 +17,11 @@ services:
       start_period: 15s
     restart: unless-stopped
     networks:
-      - psb-network
+      - pagepal-network
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
-    container_name: psb-elasticsearch
+    container_name: pagepal-elasticsearch
     ports:
       - "9200:9200"
     environment:
@@ -39,11 +39,11 @@ services:
       start_period: 30s
     restart: unless-stopped
     networks:
-      - psb-network
+      - pagepal-network
 
   neo4j:
     image: neo4j:5.24-community
-    container_name: psb-neo4j
+    container_name: pagepal-neo4j
     ports:
       - "7474:7474"
       - "7687:7687"
@@ -61,11 +61,11 @@ services:
       start_period: 30s
     restart: unless-stopped
     networks:
-      - psb-network
+      - pagepal-network
 
   redis:
     image: redis:7.4-alpine
-    container_name: psb-redis
+    container_name: pagepal-redis
     ports:
       - "6379:6379"
     volumes:
@@ -79,7 +79,7 @@ services:
       start_period: 5s
     restart: unless-stopped
     networks:
-      - psb-network
+      - pagepal-network
 
 volumes:
   chroma_data:
@@ -89,5 +89,5 @@ volumes:
   redis_data:
 
 networks:
-  psb-network:
+  pagepal-network:
     driver: bridge

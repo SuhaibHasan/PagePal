@@ -1,0 +1,27 @@
+{
+  "name": "pagepal-cdk",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "pagepal-cdk": "bin/pagepal.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff",
+    "destroy": "cdk destroy"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "aws-cdk": "2.1144.0",
+    "ts-node": "10.9.2",
+    "typescript": "5.7.2"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.272.0",
+    "constructs": "10.8.1",
+    "source-map-support": "0.5.21"
+  }
+}

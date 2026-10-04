@@ -1,0 +1,16 @@
+.git
+.github
+tests
+docs
+*.md
+!README.md
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+ui/node_modules
+ui/.next
+infra/cdk/node_modules
+infra/cdk/cdk.out

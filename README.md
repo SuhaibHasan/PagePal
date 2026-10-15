@@ -221,6 +221,30 @@ The same loaders and credentials back `POST /ingest`. If a source is unreachable
 documents simply aren't ingested for that run — it doesn't affect documents already ingested
 from other sources, or the app in general.
 
+### Structure-aware PDF parsing
+
+A single text extractor can't do justice to a PDF that mixes prose, tables, and images — naive
+extraction flattens a table's rows/columns into unreadable runs of text, and silently drops every
+embedded image. `ingestion/loaders/pdf_parser.py` splits each PDF into its three element kinds
+first and routes each to the parser actually suited to it, rather than forcing one extractor to
+handle all three:
+
+- **Prose** is extracted with `pdfplumber`, with table regions excluded from it (so a table's
+  cells don't also show up jumbled into the surrounding text).
+- **Tables** are detected by `pdfplumber`'s layout analysis and serialized to clean Markdown
+  (`| Error Code | Severity | ... |`), preserving row/column structure instead of losing it.
+- **Images** are extracted as raw bytes by `pymupdf` and described by Claude Haiku (the same
+  model used elsewhere in ingestion) — architecture diagrams, dashboard screenshots, and the
+  like become a dense, searchable text description instead of being dropped entirely.
+
+Each table and each image becomes its own `Document` (`doc_id::table-N` / `doc_id::image-N`,
+tagged `extra={"element_type": ..., "page_number": ...}`), separate from the page's prose
+document — so a table or image's content survives as its own chunk at retrieval time instead of
+being diluted into (or cut across) the surrounding prose's chunk boundaries. A PDF with no
+tables or images behaves exactly as before: one plain-text `Document`. An image whose
+description fails (e.g. a transient API error) is skipped rather than failing the whole file,
+consistent with the rest of ingestion's degrade-rather-than-fail posture.
+
 The pipeline chunks documents with a token-aware `RecursiveCharacterTextSplitter`
 (512 tokens / 50 overlap), embeds chunks locally with `sentence-transformers`
 (`all-MiniLM-L6-v2`, no external API), and upserts into:
